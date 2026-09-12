@@ -12,7 +12,7 @@ if (Test-Path -LiteralPath $archive) { throw "Archive already exists; refusing t
 $staging = Join-Path ([System.IO.Path]::GetTempPath()) ("dsh-edge-package-" + [guid]::NewGuid().ToString('N'))
 $packageRoot = Join-Path $staging 'dsh-edge-controller'
 $files = @(
-    '.gitignore', 'LICENSE', 'README.md', 'package.json', 'install.ps1', 'uninstall.ps1', 'package.ps1',
+    '.gitignore', 'AGENTS.md', 'LICENSE', 'README.md', 'package.json', 'install.ps1', 'uninstall.ps1', 'package.ps1',
     'extension/manifest.json', 'extension/allowed-origins.js',
     'extension/service-worker.js', 'extension/page-tools.js', 'extension/workflow-advice.js',
     'extension/popup.html', 'extension/popup.js',
