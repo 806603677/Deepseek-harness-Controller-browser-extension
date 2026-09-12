@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DSH Browser Controller</title>
+  <style>
+    body { width: 430px; margin: 0; padding: 14px; font: 13px/1.45 system-ui, sans-serif; color: #1f2937; }
+    h1 { margin: 0 0 8px; font-size: 17px; }
+    .status { margin-bottom: 12px; padding: 8px 10px; border-radius: 6px; background: #f3f4f6; }
+    .tab { padding: 10px 0; border-top: 1px solid #e5e7eb; }
+    .title { font-weight: 600; word-break: break-word; }
+    .url { margin: 3px 0 8px; color: #6b7280; font-size: 11px; word-break: break-all; }
+    button { border: 0; border-radius: 5px; padding: 6px 10px; color: white; background: #1769aa; cursor: pointer; }
+    button.release { background: #9b2c2c; }
+    button.secondary { color: #1f2937; background: #e5e7eb; }
+    .error { color: #9b2c2c; white-space: pre-wrap; }
+    .toolbar { display: flex; gap: 8px; margin-bottom: 8px; }
+    .settings { border: 1px solid #e5e7eb; border-radius: 6px; padding: 9px; margin-bottom: 10px; }
+    .settings label { display: block; margin: 5px 0; }
+    .settings textarea { width: 100%; box-sizing: border-box; min-height: 60px; }
+    .hint { color: #6b7280; font-size: 11px; }
+  </style>
+</head>
+<body>
+  <h1>DSH Browser Controller</h1>
+  <div id="status" class="status">正在检查 Native Host…</div>
+  <div class="settings">
+    <strong>可访问的网站（由本机用户决定）</strong>
+    <label><input type="radio" name="accessMode" value="selected" checked> 只允许以下网站</label>
+    <textarea id="origins" placeholder="每行一个完整来源，例如 https://example.org"></textarea>
+    <label><input type="radio" name="accessMode" value="all"> 所有普通 HTTP/HTTPS 网站</label>
+    <div class="hint">“所有网站”会请求广泛的浏览器权限；内部页面、文件和其他协议仍不支持。改回指定网站后，控制器立即按新名单限制；如需撤销浏览器中已授予的广泛权限，请到扩展的网站访问设置撤销。</div>
+    <button id="saveAccess">保存访问范围</button>
+  </div>
+  <div class="toolbar">
+    <button id="refresh" class="secondary">刷新</button>
+    <button id="releaseAll" class="release">释放全部</button>
+  </div>
+  <div id="error" class="error"></div>
+  <div id="tabs"></div>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

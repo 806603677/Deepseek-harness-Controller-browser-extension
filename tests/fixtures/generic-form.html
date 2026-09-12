@@ -1,0 +1,17 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Generic controller fixture</title>
+<label for="person-name">Full name</label>
+<input id="person-name" name="person" value="" placeholder="Type a name">
+<label for="color">Favorite color</label>
+<select id="color"><option value="red">Red</option><option value="blue">Blue</option></select>
+<div id="notes-label">Notes</div>
+<div id="notes" role="textbox" contenteditable="true" aria-labelledby="notes-label"></div>
+<button id="save-button" type="button">Save draft</button>
+<input id="secret" type="hidden" value="private-token-example">
+<div id="shadow-host"></div>
+<iframe id="same-origin-frame" title="Embedded form" srcdoc="<label for='inside'>Frame field</label><input id='inside' value=''>"></iframe>
+<script>
+  const shadow = document.querySelector('#shadow-host').attachShadow({ mode: 'open' })
+  shadow.innerHTML = '<label for="shadow-field">Shadow field</label><input id="shadow-field">'
+</script>

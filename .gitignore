@@ -1,0 +1,5 @@
+runtime/
+native-host/bin/
+native-host/com.dsh.edge.json
+dist/
+*.log

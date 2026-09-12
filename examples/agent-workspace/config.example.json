@@ -1,0 +1,9 @@
+{
+  "controllerScript": "C:/REPLACE_ME/dsh-edge-controller/scripts/dsh-edge.mjs",
+  "memoryRoot": "memory/sites",
+  "skillsRoot": ".agents/skills",
+  "maxLoadedMemoryChars": 1600,
+  "maxSiteSkillTokens": 300,
+  "modelTokensPerSecond": 25,
+  "strictSiteBoundary": true
+}

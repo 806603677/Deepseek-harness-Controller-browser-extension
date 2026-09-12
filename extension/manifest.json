@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "DSH Edge Controller",
+  "version": "0.8.0",
+  "description": "Control user-approved browser tabs from DSH without a remote debugging port.",
+  "permissions": [
+    "debugger",
+    "tabs",
+    "nativeMessaging",
+    "storage",
+    "alarms"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "DSH Edge Controller",
+    "default_popup": "popup.html"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "dsh-browser-controller",
+  "private": true,
+  "version": "0.8.0",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test": "node tests/allowed-origins.mjs && node tests/access-policy-worker.mjs && node tests/workflow-advice.mjs && node tests/site-context-isolation.mjs && node tests/example-skill-layout.mjs && node tests/bridge-roundtrip.mjs"
+  }
+}
