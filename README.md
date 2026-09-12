@@ -2,6 +2,8 @@
 
 这是供 DSH 或其他可执行本地命令的智能体使用的**本机浏览器桥接组件**，不是 Codex 插件或独立的 iOS App。它连接用户已打开的桌面浏览器标签，不要求以 `--remote-debugging-port` 启动浏览器。
 
+本仓库 `Deepseek-harness-Controller-browser-extension` 主要针对 DeepSeek Harness 优化；其他 Harness 可参考本机命令接口适配，但尚未完成端到端兼容验证。
+
 若要让 Agent 为不同网站建立精简的表单/入口 Memory，并在重复工作值得流程化时征询用户，请看 [独立 Agent 示范工程](examples/agent-workspace/SETUP.md)。插件只给页面结构和流程建议，不自动写 Memory 或 Skill。
 
 ```text
@@ -13,7 +15,7 @@
 
 ## 获取、放置和依赖
 
-- Fork / clone 仓库后，保留整个 `dsh-edge-controller/` 目录，例如 `C:\Tools\my-fork\dsh-edge-controller`。也可解压 `dist/dsh-edge-controller-source-0.8.0.zip`；ZIP 内同名目录即组件根目录。不要只复制 `extension/`，否则 DSH 无法调用客户端和宿主。
+- Fork / clone 仓库后，**克隆目录本身**就是组件根目录；默认目录名可能是 `Deepseek-harness-Controller-browser-extension`，也可以克隆到自定的 `dsh-edge-controller` 目录。若另行取得 `dsh-edge-controller-source-0.8.0.zip`，ZIP 内的 `dsh-edge-controller/` 才是组件根目录。不要只复制 `extension/`，否则 DSH 无法调用客户端和宿主。
 - Windows 10/11、桌面 Microsoft Edge 或 Google Chrome、PowerShell、Node.js（建议 18+）、Windows .NET Framework 4.x 的 `csc.exe`。安装脚本会在每台机器上本地编译 C# 宿主；**不分发本机编译好的 EXE**。无编译器时请在该机器上安装相应 .NET Framework 开发工具，再运行安装脚本。
 - 别在打包后移动组件目录：Native Host 的注册表配置记录了本机绝对路径。移动后重新运行安装脚本。安装仅修改当前 Windows 用户的对应浏览器 Native Messaging 注册表键，不需要管理员权限。
 - `runtime/`、`native-host/bin/`、`dist/` 和本机生成的宿主清单不在源码包内。不要把这些文件提交到公开 fork；旧版 `native-host/com.dsh.edge.json` 若存在，也不用于新安装。
