@@ -1,4 +1,4 @@
-import { DEFAULT_ACCESS_POLICY, isAllowedUrl, normalizeAccessPolicy, permissionPatterns } from './allowed-origins.js'
+import { permissionPatternForUrl } from './allowed-origins.js'
 import { createPageTools } from './page-tools.js'
 import { assessWorkflow } from './workflow-advice.js'
 
@@ -7,14 +7,15 @@ const RECONNECT_ALARM = 'dsh-native-host-reconnect'
 let nativePort = null
 let reconnectTimer = null
 const claimedTabs = new Set()
-let accessPolicy = DEFAULT_ACCESS_POLICY
-const policyReady = chrome.storage.local.get('accessPolicy').then(stored => {
-  try { accessPolicy = normalizeAccessPolicy(stored.accessPolicy) } catch { /* fail closed */ }
+let browserAccessEnabled = false
+const accessReady = chrome.storage.local.get('browserAccessEnabled').then(stored => {
+  browserAccessEnabled = stored.browserAccessEnabled === true
 }).catch(() => {})
 
 async function siteIsAllowed(rawUrl) {
-  if (!isAllowedUrl(rawUrl, accessPolicy)) return false
-  return chrome.permissions.contains({ origins: [`${new URL(rawUrl).origin}/*`] })
+  if (!browserAccessEnabled) return false
+  const pattern = permissionPatternForUrl(rawUrl)
+  return pattern ? chrome.permissions.contains({ origins: [pattern] }) : false
 }
 
 function sanitizedUrl(rawUrl) {
@@ -98,7 +99,7 @@ async function claimTab(tabId) {
   const numericId = Number(tabId)
   const tab = await chrome.tabs.get(numericId)
   if (!await siteIsAllowed(tab.url || '')) {
-    throw new Error('Site not approved in the extension popup or browser permissions')
+    throw new Error('Controller disabled or site not approved in browser site access settings')
   }
   if (claimedTabs.has(numericId)) return tabSummary(tab)
 
@@ -319,25 +320,20 @@ async function runSequence(tabId, steps) {
 }
 
 async function executeRequest(message, source = 'native') {
-  await policyReady
+  await accessReady
   const params = message.params || {}
   const tabScopedMethods = new Set(['navigate', 'reload', 'dom', 'find', 'guide', 'advise', 'text', 'eval', 'screenshot', 'click', 'fill', 'blur', 'key', 'value', 'sequence'])
   if (tabScopedMethods.has(message.method)) await ensureClaimed(params.tabId)
   switch (message.method) {
     case 'status':
-      return { nativeHostConnected: Boolean(nativePort), claimedTabIds: [...claimedTabs].map(String), accessPolicy }
-    case 'set_access_policy': {
-      if (source !== 'popup') throw new Error('Only the browser popup can change site access')
-      const next = normalizeAccessPolicy(params.policy)
-      for (const pattern of permissionPatterns(next)) {
-        if (!await chrome.permissions.contains({ origins: [pattern] })) throw new Error(`Browser permission missing: ${pattern}`)
-      }
-      await chrome.storage.local.set({ accessPolicy: next })
-      accessPolicy = next
-      for (const tabId of [...claimedTabs]) {
-        try { await requireClaimed(tabId) } catch { /* revoked or out of scope */ }
-      }
-      return accessPolicy
+      return { nativeHostConnected: Boolean(nativePort), claimedTabIds: [...claimedTabs].map(String), browserAccessEnabled }
+    case 'set_browser_access_enabled': {
+      if (source !== 'popup') throw new Error('Only the browser popup can enable the controller')
+      if (typeof params.enabled !== 'boolean') throw new Error('Expected a boolean enabled value')
+      await chrome.storage.local.set({ browserAccessEnabled: params.enabled })
+      browserAccessEnabled = params.enabled
+      if (!browserAccessEnabled) await releaseAllTabs()
+      return { browserAccessEnabled }
     }
     case 'list':
       return listAllowedTabs()
@@ -432,13 +428,13 @@ chrome.tabs.onRemoved.addListener(tabId => {
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (!claimedTabs.has(tabId) || !changeInfo.url) return
-  policyReady.then(() => siteIsAllowed(changeInfo.url)).then(allowed => {
+  accessReady.then(() => siteIsAllowed(changeInfo.url)).then(allowed => {
     if (!allowed) return releaseTab(tabId)
   }).catch(() => releaseTab(tabId).catch(() => {}))
 })
 
 chrome.permissions.onRemoved.addListener(() => {
-  policyReady.then(async () => {
+  accessReady.then(async () => {
     for (const tabId of [...claimedTabs]) {
       try { await requireClaimed(tabId) } catch { /* permission revoked */ }
     }
@@ -457,7 +453,7 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.runtime.onStartup.addListener(connectNativeHost)
 
 async function restoreStoredClaims() {
-  await policyReady
+  await accessReady
   for (const tabId of await storedClaimIds()) {
     try {
       const tab = await chrome.tabs.get(Number(tabId))

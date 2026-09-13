@@ -9,7 +9,7 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
 }
 $OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
-$output = Join-Path $OutputDirectory 'DshEdgeNativeHost-0.8.0.exe'
+$output = Join-Path $OutputDirectory 'DshEdgeNativeHost-0.9.0.exe'
 
 $candidates = @(
     (Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'),

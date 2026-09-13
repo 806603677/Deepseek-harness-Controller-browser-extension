@@ -8,7 +8,7 @@ import { mkdir, mkdtemp, readFile, rename, rm, unlink, writeFile } from 'node:fs
 import os from 'node:os'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
-const executable = path.resolve(here, '..', 'native-host', 'bin', 'DshEdgeNativeHost-0.8.0.exe')
+const executable = path.resolve(here, '..', 'native-host', 'bin', 'DshEdgeNativeHost-0.9.0.exe')
 const testPipeName = `dsh-edge-bridge-test-${process.pid}`
 const runtime = await mkdtemp(path.join(os.tmpdir(), 'dsh-edge-test-'))
 const child = spawn(executable, [], {

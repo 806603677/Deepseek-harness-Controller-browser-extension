@@ -10,8 +10,9 @@ const attached = new Set()
 let nativeHandler
 let popupHandler
 const responses = []
-let localPolicy
+let browserAccessEnabled = false
 let sessionClaims = []
+let permissionRemovedHandler
 const port = {
   onMessage: { addListener(fn) { nativeHandler = fn } },
   onDisconnect: { addListener() {} },
@@ -22,19 +23,19 @@ const noopListener = { addListener() {} }
 globalThis.chrome = {
   runtime: {
     id: extensionId,
-    getManifest: () => ({ version: '0.8.0' }),
+    getManifest: () => ({ version: '0.9.0' }),
     connectNative: () => port,
     onMessage: { addListener(fn) { popupHandler = fn } },
     onInstalled: noopListener,
     onStartup: noopListener
   },
   storage: {
-    local: { get: async () => ({ accessPolicy: localPolicy }), set: async value => { localPolicy = value.accessPolicy } },
+    local: { get: async () => ({ browserAccessEnabled }), set: async value => { browserAccessEnabled = value.browserAccessEnabled } },
     session: { get: async () => ({ claimedTabIds: sessionClaims }), set: async value => { sessionClaims = value.claimedTabIds } }
   },
   permissions: {
     contains: async ({ origins }) => origins.every(pattern => granted.has(pattern) || granted.has(`${pattern.split(':')[0]}://*/*`)),
-    onRemoved: noopListener
+    onRemoved: { addListener(fn) { permissionRemovedHandler = fn } }
   },
   tabs: {
     query: async () => [...tabs.values()],
@@ -80,17 +81,25 @@ async function native(method, params = {}) {
 }
 
 assert.deepEqual((await native('list')).result, [])
-assert.equal((await native('set_access_policy', { policy: { mode: 'all' } })).ok, false)
+assert.equal((await native('set_browser_access_enabled', { enabled: true })).ok, false)
 assert.equal((await native('claim', { tabId: 1 })).ok, false)
 granted.add('https://example.org/*')
-assert.equal((await popup('set_access_policy', { policy: { mode: 'selected', origins: ['https://example.org'] } })).ok, true)
+assert.deepEqual((await native('list')).result, [], 'browser grant alone does not enable the controller')
+assert.equal((await popup('set_browser_access_enabled', { enabled: 'yes' })).ok, false)
+assert.equal((await popup('set_browser_access_enabled', { enabled: true })).ok, true)
 assert.deepEqual((await native('list')).result.map(tab => tab.id), ['1'])
 assert.equal((await native('claim', { tabId: 1 })).ok, true)
 assert.equal(attached.has(1), true)
 assert.equal((await native('new', { url: 'https://other.test/' })).ok, false)
+granted.delete('https://example.org/*')
+permissionRemovedHandler()
+await new Promise(resolve => setImmediate(resolve))
+assert.equal(attached.has(1), false, 'revoking browser access releases a claimed tab')
+assert.equal((await native('claim', { tabId: 1 })).ok, false)
+granted.add('https://example.org/*')
+assert.equal((await native('claim', { tabId: 1 })).ok, true)
 granted.add('http://*/*')
 granted.add('https://*/*')
-assert.equal((await popup('set_access_policy', { policy: { mode: 'all' } })).ok, true)
 assert.deepEqual((await native('list')).result.map(tab => tab.id), ['1', '2'])
 const guide = await native('guide', { tabId: 1 })
 assert.equal(guide.ok, true)
@@ -110,7 +119,7 @@ assert.equal(sequence.result.steps[1].ok, false)
 assert.match(sequence.result.steps[1].error, /site boundary/)
 assert.equal(sequence.result.steps.length, 2, 'cross-site boundary must override continueOnError')
 tabs.get(1).url = 'https://example.org/page'
-assert.equal((await popup('set_access_policy', { policy: { mode: 'selected', origins: [] } })).ok, true)
+assert.equal((await popup('set_browser_access_enabled', { enabled: false })).ok, true)
 assert.equal(attached.has(1), false)
 assert.deepEqual((await native('list')).result, [])
-process.stdout.write('worker access policy and native privilege boundary: ok\n')
+process.stdout.write('browser site access and native privilege boundary: ok\n')

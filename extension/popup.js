@@ -1,10 +1,8 @@
-import { normalizeAccessPolicy, permissionPatterns } from './allowed-origins.js'
-
 const statusElement = document.getElementById('status')
 const tabsElement = document.getElementById('tabs')
 const errorElement = document.getElementById('error')
-const originsElement = document.getElementById('origins')
-let settingsLoaded = false
+const toggleAccessElement = document.getElementById('toggleAccess')
+let browserAccessEnabled = false
 
 function request(method, params = {}) {
   return chrome.runtime.sendMessage({ channel: 'popup', method, params }).then(response => {
@@ -35,18 +33,17 @@ function button(text, className, onClick) {
 async function refresh() {
   errorElement.textContent = ''
   const [status, tabs] = await Promise.all([request('status'), request('list')])
-  if (!settingsLoaded) {
-    document.querySelector(`input[name="accessMode"][value="${status.accessPolicy.mode}"]`).checked = true
-    originsElement.value = status.accessPolicy.origins.join('\n')
-    settingsLoaded = true
-  }
+  browserAccessEnabled = status.browserAccessEnabled
+  toggleAccessElement.textContent = browserAccessEnabled ? '暂停控制器' : '启用控制器'
   statusElement.textContent = status.nativeHostConnected
-    ? `Native Host 已连接；已接管 ${status.claimedTabIds.length} 个页面`
+    ? `Native Host 已连接；控制器${browserAccessEnabled ? '已启用' : '未启用'}；已接管 ${status.claimedTabIds.length} 个页面`
     : 'Native Host 未连接，请先运行 install.ps1 后重新加载扩展'
   tabsElement.replaceChildren()
 
   if (!tabs.length) {
-    tabsElement.textContent = '当前没有打开的已授权网站页面；先配置并保存访问范围。'
+    tabsElement.textContent = browserAccessEnabled
+      ? '当前没有浏览器已授权的网站页面；请检查扩展详细信息中的网站访问权限。'
+      : '先在扩展详细信息中配置网站访问权限，再启用控制器。'
     return
   }
 
@@ -67,28 +64,16 @@ async function refresh() {
   }
 }
 
-document.getElementById('saveAccess').addEventListener('click', async event => {
-  const button = event.currentTarget
+toggleAccessElement.addEventListener('click', async () => {
   errorElement.textContent = ''
+  toggleAccessElement.disabled = true
   try {
-    const mode = document.querySelector('input[name="accessMode"]:checked').value
-    const policy = normalizeAccessPolicy({
-      mode,
-      origins: originsElement.value.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
-    })
-    // Must be called directly from the popup click; native clients cannot grant themselves sites.
-    const patterns = permissionPatterns(policy)
-    if (patterns.length && !await chrome.permissions.request({ origins: patterns })) {
-      throw new Error('浏览器权限未获批准；访问范围未改变')
-    }
-    button.disabled = true
-    await request('set_access_policy', { policy })
-    settingsLoaded = false
+    await request('set_browser_access_enabled', { enabled: !browserAccessEnabled })
     await refresh()
   } catch (error) {
     errorElement.textContent = error.message
   } finally {
-    button.disabled = false
+    toggleAccessElement.disabled = false
   }
 })
 

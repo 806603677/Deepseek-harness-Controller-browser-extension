@@ -11,11 +11,11 @@
   → Native Messaging Host → Edge/Chrome 扩展 → 已接管标签的 chrome.debugger/CDP
 ```
 
-若 DSH 沙箱不允许访问 Named Pipe，客户端在 `auto` 模式下回退到本地 `runtime/` 文件信箱。所有控制操作只针对用户先在扩展弹窗批准的网站和已接管的标签；网站权限**不等于**允许智能体自行保存、提交或修改业务数据。
+若 DSH 沙箱不允许访问 Named Pipe，客户端在 `auto` 模式下回退到本地 `runtime/` 文件信箱。所有控制操作只针对浏览器“网站访问权限”当前允许、且控制器已启用的网页；用户仍须接管具体标签。网站权限**不等于**允许智能体自行保存、提交或修改业务数据。
 
 ## 获取、放置和依赖
 
-- Fork / clone 仓库后，**克隆目录本身**就是组件根目录；默认目录名可能是 `Deepseek-harness-Controller-browser-extension`，也可以克隆到自定的 `dsh-edge-controller` 目录。若另行取得 `dsh-edge-controller-source-0.8.0.zip`，ZIP 内的 `dsh-edge-controller/` 才是组件根目录。不要只复制 `extension/`，否则 DSH 无法调用客户端和宿主。
+- Fork / clone 仓库后，**克隆目录本身**就是组件根目录；默认目录名可能是 `Deepseek-harness-Controller-browser-extension`，也可以克隆到自定的 `dsh-edge-controller` 目录。若另行取得 `dsh-edge-controller-source-0.9.0.zip`，ZIP 内的 `dsh-edge-controller/` 才是组件根目录。不要只复制 `extension/`，否则 DSH 无法调用客户端和宿主。
 - Windows 10/11、桌面 Microsoft Edge 或 Google Chrome、PowerShell、Node.js（建议 18+）、Windows .NET Framework 4.x 的 `csc.exe`。安装脚本会在每台机器上本地编译 C# 宿主；**不分发本机编译好的 EXE**。无编译器时请在该机器上安装相应 .NET Framework 开发工具，再运行安装脚本。
 - 别在打包后移动组件目录：Native Host 的注册表配置记录了本机绝对路径。移动后重新运行安装脚本。安装仅修改当前 Windows 用户的对应浏览器 Native Messaging 注册表键，不需要管理员权限。
 - `runtime/`、`native-host/bin/`、`dist/` 和本机生成的宿主清单不在源码包内。不要把这些文件提交到公开 fork；旧版 `native-host/com.dsh.edge.json` 若存在，也不用于新安装。
@@ -30,17 +30,18 @@
    .\install.ps1 -Browser Edge -ExtensionId '<扩展卡片上的32位ID>'
    ```
 
-3. 回 `edge://extensions` 点扩展卡片的“重新加载”；将扩展固定到工具栏，打开弹窗。先配置访问范围并保存，再打开目标页面，点“交给 DSH”。浏览器的调试提示及标签上的 `DSH` 徽标是接管提示。
+3. 回 `edge://extensions` 点扩展卡片的“重新加载”，打开本扩展“详细信息”，在“网站访问权限”选择“单击时”“在特定站点上”或“在所有站点上”。若选特定站点，使用浏览器的“添加站点”输入框添加目标网站。将扩展固定到工具栏，在弹窗中点“启用控制器”，再打开目标页面，点“交给 DSH”。浏览器的调试提示及标签上的 `DSH` 徽标是接管提示。
 4. 如果 Native Host 未连接，确认安装脚本显示的宿主 EXE 与清单均存在、扩展 ID 精确一致，并重新加载扩展。企业策略可能禁止扩展、Native Messaging 或调试器。
 
 ## 网站访问范围（使用者自行决定）
 
-新安装默认**没有任何可访问网站**。扩展弹窗有两种选择：
+新安装及从旧版升级后，控制器默认**未启用**。先在扩展管理页的“网站访问权限”选择浏览器提供的模式，再在扩展弹窗中启用控制器：
 
-- “只允许以下网站”：每行一个完整来源，例如 `https://edc.example.org`、`http://localhost:3000`。协议、主机和端口须匹配；不接受路径、查询参数、登录信息或通配符。可用空列表关闭全部网站。
-- “所有普通 HTTP/HTTPS 网站”：由本机用户确认浏览器广泛访问授权。它不包含 `file:`、`chrome:`、`edge:` 等内部或本地页面。
+- “单击时”：在目标页面点击扩展图标后，浏览器临时允许该页面；随后在弹窗中接管标签。离开授权范围后需重新授予。
+- “在特定站点上”：通过浏览器的“添加站点”输入框添加目标网站；只有浏览器授予的网站可被列出和接管。优先使用此模式。
+- “在所有站点上”：浏览器允许扩展访问普通 HTTP/HTTPS 网站，但控制器仍只操作已接管的标签。不支持 `file:`、`chrome:`、`edge:` 等页面。
 
-保存会触发浏览器的可选网站权限请求；拒绝时原配置不变。已接管标签若离开允许范围、用户收回权限或缩小范围，会被释放。智能体通过 Native Host **不能修改访问配置**，只能控制已获浏览器权限且通过当前设置的网页。按最小权限原则，优先选指定网站；从“所有网站”改回指定网站后，控制器会立即收窄实际可操作范围，但浏览器可能仍保留之前授予的广泛权限；若要同时撤销浏览器层的授权，请在扩展卡片“详细信息 / 网站访问”中调整。
+控制器每次操作前都检查浏览器实际授予的当前来源权限，不能通过 Native Host 修改网站访问模式。若浏览器收回权限或标签转到未授权网站，控制器会释放标签。弹窗的“暂停控制器”会立即释放全部标签并阻止新的接管；旧版弹窗保存的网站名单不再使用。浏览器可能在升级扩展后显示广泛的网站权限，因此**先核对并收窄浏览器设置，再启用控制器**。
 
 此扩展拥有 `debugger` 权限，获用户授权的网页可能包含敏感数据。请勿在共享机器上开放所有网站，也不要把 `runtime/` 共享给他人。URL 输出会遮蔽常见令牌参数，密码输入被阻止，明显的 Cookie/Storage 读取脚本被阻止；**这些过滤不是完整的数据防泄漏沙箱**，只将控制权交给可信智能体。
 
@@ -48,7 +49,7 @@
 
 DSH 的预设、工作目录和 shell 工具名称可能不同，不要假定固定的 DSH 内置插件语法。给智能体提供组件根目录的**本机绝对路径**，让它用其实际可用的本地命令工具调用脚本；能执行 Node.js 和访问当前用户的桥接通道即可。一个可直接加入项目说明/智能体提示的示例：
 
-> 浏览器控制器位于 `C:\Tools\my-fork\dsh-edge-controller`。先用本地命令运行 `node "C:\Tools\my-fork\dsh-edge-controller\scripts\dsh-edge.mjs" status` 和 `list`，只从列表中选择用户已授权的准确 tabId。若未接管，确认用户已在扩展弹窗批准网站，再 `claim <tabId>`。先用 `find` 按标签、占位符、角色或文字找字段；从返回结果复制精确 `locator` 再操作。网页操作必须以当前页面内容验证；修改/保存/提交业务数据须先获得用户针对具体范围的授权。命令失败时报告错误，不要改用不受控的浏览器会话或猜测 tabId。
+> 浏览器控制器位于 `C:\Tools\my-fork\dsh-edge-controller`。先用本地命令运行 `node "C:\Tools\my-fork\dsh-edge-controller\scripts\dsh-edge.mjs" status` 和 `list`，只从列表中选择用户已授权的准确 tabId。若未接管，确认用户已在浏览器扩展管理页授予网站访问权限、在弹窗启用控制器，再 `claim <tabId>`。先用 `find` 按标签、占位符、角色或文字找字段；从返回结果复制精确 `locator` 再操作。网页操作必须以当前页面内容验证；修改/保存/提交业务数据须先获得用户针对具体范围的授权。命令失败时报告错误，不要改用不受控的浏览器会话或猜测 tabId。
 
 在组件目录下演示（在其他目录运行时请使用上述绝对脚本路径）：
 
@@ -96,10 +97,10 @@ node .\scripts\dsh-edge.mjs value 'css=#person-name' <tabId>
 
 ## Chrome 桌面与 iOS 可行性
 
-- **Windows 桌面 Chrome：提供安装路径，待独立实机验证。** 在 `chrome://extensions` 以同样方式加载 `extension/`，复制 Chrome 显示的扩展 ID，运行 `.\install.ps1 -Browser Chrome -ExtensionId '<Chrome扩展ID>'`，重新加载并在弹窗授权网站。脚本写入当前用户的 `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.dsh.edge`，与 Edge 的注册分开。两种浏览器若同时运行，当前版本共享同一个 Pipe 和 `runtime/`，**不保证请求路由到预期浏览器**；请只启用一个浏览器的本组件。没有在真实 Chrome 会话里做端到端控制测试，不能宣称已验证兼容。
+- **Windows 桌面 Chrome：提供安装路径，待独立实机验证。** 在 `chrome://extensions` 以同样方式加载 `extension/`，复制 Chrome 显示的扩展 ID，运行 `.\install.ps1 -Browser Chrome -ExtensionId '<Chrome扩展ID>'`，重新加载，在扩展“详细信息 / 网站访问权限”选择模式并添加所需站点，然后在弹窗启用控制器。脚本写入当前用户的 `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.dsh.edge`，与 Edge 的注册分开。两种浏览器若同时运行，当前版本共享同一个 Pipe 和 `runtime/`，**不保证请求路由到预期浏览器**；请只启用一个浏览器的本组件。没有在真实 Chrome 会话里做端到端控制测试，不能宣称已验证兼容。
 - **iOS Chrome：不能直接加载本桌面扩展**。**iOS Safari：有移植方向，但不是解压或安装此包即可使用**。需要按 Safari Web Extension 的分发机制重新打包，并以 iOS 原生 App Extension/消息链路替换 Windows EXE、注册表、Named Pipe；还需重新设计 `chrome.debugger`/CDP 依赖和智能体在设备上的接入方式。本站点策略和部分 UI/协议代码可作为设计参考，当前没有 iOS 构建或实机验证。
 
-相关官方资料：[Chrome 可选网站权限](https://developer.chrome.com/docs/extensions/reference/api/permissions)、[Chrome debugger API](https://developer.chrome.com/docs/extensions/reference/api/debugger)、[Edge Native Messaging](https://learn.microsoft.com/en-us/microsoft-edge/extensions/developer-guide/native-messaging)、[Chrome 移动设备扩展限制](https://support.google.com/chrome_webstore/answer/1698338)、[Safari Web Extension 分发](https://developer.apple.com/documentation/safariservices/packaging-and-distributing-safari-web-extensions-with-app-store-connect)、[Safari 原生消息](https://developer.apple.com/documentation/safariservices/messaging-between-the-app-and-javascript-in-a-safari-web-extension)。
+相关官方资料：[Chrome 网站权限](https://developer.chrome.com/docs/extensions/develop/concepts/declare-permissions)、[Chrome debugger API](https://developer.chrome.com/docs/extensions/reference/api/debugger)、[Edge Native Messaging](https://learn.microsoft.com/en-us/microsoft-edge/extensions/developer-guide/native-messaging)、[Chrome 移动设备扩展限制](https://support.google.com/chrome_webstore/answer/1698338)、[Safari Web Extension 分发](https://developer.apple.com/documentation/safariservices/packaging-and-distributing-safari-web-extensions-with-app-store-connect)、[Safari 原生消息](https://developer.apple.com/documentation/safariservices/messaging-between-the-app-and-javascript-in-a-safari-web-extension)。
 
 ## 测试、打包及卸载
 
@@ -117,4 +118,4 @@ node .\tests\bridge-roundtrip.mjs
 
 若要自己验证跨网站定位，可运行 `node .\tests\fixture-server.mjs`，在 Edge/Chrome 打开其打印的本地 URL，将该 URL 的来源加入扩展允许名单，接管标签后执行 `find 'label=Full name'`、`find 'label=Shadow field'` 和 `find 'label=Frame field'`。测试页只含虚构字段。开发时的页面工具检查已覆盖普通输入框、原生下拉框、简单可编辑区域、开放式 Shadow DOM、同源 iframe 和隐藏值遮蔽；正式扩展在真实第三方网站上的表现仍须逐站验证。
 
-`package.ps1` 输出 `dist/dsh-edge-controller-source-0.8.0.zip`，只包含源码、MIT 许可证、安装脚本、示范工程、测试页面和说明；已有同名 ZIP 会拒绝覆盖。包中的使用者仍须在各自机器上加载扩展并运行安装脚本。卸载不删除扩展或组件目录；浏览器扩展须在对应扩展管理页面另行移除。项目采用 [MIT 许可证](LICENSE)，版权署名为 Lewis。
+`package.ps1` 输出 `dist/dsh-edge-controller-source-0.9.0.zip`，只包含源码、MIT 许可证、安装脚本、示范工程、测试页面和说明；已有同名 ZIP 会拒绝覆盖。包中的使用者仍须在各自机器上加载扩展并运行安装脚本。卸载不删除扩展或组件目录；浏览器扩展须在对应扩展管理页面另行移除。项目采用 [MIT 许可证](LICENSE)，版权署名为 Lewis。

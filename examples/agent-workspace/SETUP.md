@@ -7,7 +7,7 @@
 1. 将 `examples/agent-workspace/` 复制到**自己的独立 Agent 项目目录**，不要复制到浏览器扩展 `extension/` 中，也不要连同原 Clinflash 项目的业务文件一起发布。
 2. 把 `config.example.json` 复制为 `config.local.json`；填写本机 `controllerScript` 的绝对路径，以及本项目 `memoryRoot`、`skillsRoot`。按所用模型估计 `modelTokensPerSecond`，慢模型可设得更低；`maxSiteSkillTokens` 默认 300，是每个网站 Skill 的上限而非写作目标。
 3. 运行 `node scripts/site-context.mjs check`。若本机 Agent 没有 Node 工具，则改写这层路由脚本或把规则放入其项目指令；不要凭空称已经接通。
-4. 确认扩展在浏览器中已安装、网站已由用户授权。智能体用 `node <controllerScript> status`、`list` 检查链路；只对用户当前授权的网站接管标签。
+4. 确认扩展在浏览器中已安装、用户已在扩展“详细信息 / 网站访问权限”中授权所需网站，并在弹窗启用控制器。智能体用 `node <controllerScript> status`、`list` 检查链路；只对用户当前授权的网站接管标签。
 
 ## 每次换网页/任务
 
