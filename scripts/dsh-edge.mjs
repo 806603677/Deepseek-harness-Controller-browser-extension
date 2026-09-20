@@ -21,7 +21,10 @@ const USAGE = `usage:
   node dsh-edge.mjs release-all
   node dsh-edge.mjs new <approvedUrl>
   node dsh-edge.mjs nav <approvedUrl> [tabId]
-  node dsh-edge.mjs dom [tabId]
+  node dsh-edge.mjs dom [tabId] [--compact] [--scope <locator>] [--selector <css>] [--fields <comma-list>] [--limit <n>] [--text] [--text-limit <n>] [--values] [--since <snapshotId>]
+  node dsh-edge.mjs dom-options <options.json> [tabId]
+  node dsh-edge.mjs wait-for <condition.json> [tabId]
+  node dsh-edge.mjs assert <condition.json> [tabId]
   node dsh-edge.mjs find <text|label=...|placeholder=...|role=...|css=...> [tabId]
   node dsh-edge.mjs guide [tabId]
   node dsh-edge.mjs advise <evidence.json> [tabId]
@@ -38,6 +41,13 @@ const USAGE = `usage:
   node dsh-edge.mjs eval-file <script.js> [tabId]
   node dsh-edge.mjs sequence <steps.json> [tabId]
   node dsh-edge.mjs sequence-json <jsonArray> [tabId]`
+
+function responseError(response) {
+  const error = new Error(response.error || 'DSH Edge request failed')
+  error.code = response.code
+  error.details = response.details
+  return error
+}
 
 function pipeRequest(requestId, method, params, timeoutMs) {
   const payload = JSON.stringify({ type: 'request', requestId, method, params }) + '\n'
@@ -67,7 +77,7 @@ function pipeRequest(requestId, method, params, timeoutMs) {
       try { response = JSON.parse(buffer.slice(0, newline)) }
       catch (error) { return finish(new Error(`Invalid Native Host response: ${error.message}`)) }
       if (response.requestId && response.requestId !== requestId) return finish(new Error('Native Host response ID mismatch'))
-      if (!response.ok) return finish(new Error(response.error || 'DSH Edge request failed'))
+      if (!response.ok) return finish(responseError(response))
       finish(null, response.result)
     })
     socket.on('error', error => {
@@ -105,7 +115,7 @@ async function fileRequest(requestId, method, params, timeoutMs) {
         const response = JSON.parse(await readFile(responsePath, 'utf8'))
         await unlink(responsePath).catch(() => {})
         if (response.requestId && response.requestId !== requestId) throw new Error('Native Host response ID mismatch')
-        if (!response.ok) throw new Error(response.error || 'DSH Edge request failed')
+        if (!response.ok) throw responseError(response)
         return response.result
       } catch (error) {
         if (error.code !== 'ENOENT') throw error
@@ -139,14 +149,13 @@ async function request(method, params = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
   }
   if (TRANSPORT !== 'auto') throw new Error(`Unsupported DSH_EDGE_TRANSPORT: ${TRANSPORT}`)
 
-  try {
-    const preference = JSON.parse(await readFile(TRANSPORT_PREFERENCE_PATH, 'utf8'))
-    if (preference.transport === 'file' && Number(preference.until || 0) > Date.now()) {
-      const result = await fileRequest(requestId, method, params, timeoutMs)
-      lastTransport = 'file'
-      return result
-    }
-  } catch {}
+  let preference
+  try { preference = JSON.parse(await readFile(TRANSPORT_PREFERENCE_PATH, 'utf8')) } catch {}
+  if (preference?.transport === 'file' && Number(preference.until || 0) > Date.now()) {
+    const result = await fileRequest(requestId, method, params, timeoutMs)
+    lastTransport = 'file'
+    return result
+  }
 
   try {
     const result = await pipeRequest(requestId, method, params, timeoutMs)
@@ -179,6 +188,32 @@ function print(value) {
   else process.stdout.write(JSON.stringify(value, null, 2) + '\n')
 }
 
+function printSequence(result) {
+  print(result)
+  if (result.success === false) process.exitCode = 1
+}
+
+function domArguments(args) {
+  let preferred
+  const options = {}
+  const names = { '--scope': 'scope', '--selector': 'selector', '--fields': 'fields', '--limit': 'limit', '--text-limit': 'textLimit', '--since': 'since' }
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]
+    if (arg === '--compact') options.mode = 'compact'
+    else if (arg === '--text') options.includeText = true
+    else if (arg === '--values') options.includeValues = true
+    else if (names[arg]) {
+      const value = args[++i]
+      if (value === undefined || value.startsWith('--')) throw new Error(`${arg} requires a value`)
+      options[names[arg]] = arg === '--fields' ? value.split(',').map(field => field.trim())
+        : ['--limit', '--text-limit'].includes(arg) ? Number(value) : value
+    } else if (!preferred && /^\d+$/.test(arg)) preferred = arg
+    else throw new Error(`Unknown dom argument: ${arg}`)
+  }
+  if (options.includeValues && !options.fields) options.fields = ['locator', 'role', 'labels', 'text', 'value', 'checked', 'disabled']
+  return { preferred, options: Object.keys(options).length ? { mode: 'compact', ...options } : undefined }
+}
+
 async function main() {
   const [, , command, ...args] = process.argv
   if (!command) throw new Error(USAGE)
@@ -205,8 +240,23 @@ async function main() {
       return print(await request('navigate', { url: args[0], tabId }))
     }
     case 'dom': {
-      const tabId = await resolveTabId(args[0])
-      return print(await request('dom', { tabId }))
+      const { preferred, options } = domArguments(args)
+      const tabId = await resolveTabId(preferred)
+      return print(await request('dom', { tabId, options }))
+    }
+    case 'dom-options': {
+      if (!args[0]) throw new Error('dom-options requires an options JSON file')
+      const options = JSON.parse(await readFile(args[0], 'utf8'))
+      if (!options || Array.isArray(options) || typeof options !== 'object') throw new Error('Snapshot options must be an object')
+      const tabId = await resolveTabId(args[1])
+      return print(await request('dom', { tabId, options: { mode: 'compact', ...options } }))
+    }
+    case 'wait-for':
+    case 'assert': {
+      if (!args[0]) throw new Error(`${command} requires a condition JSON file`)
+      const condition = JSON.parse(await readFile(args[0], 'utf8'))
+      const tabId = await resolveTabId(args[1])
+      return print(await request(command === 'wait-for' ? 'waitFor' : 'assert', { ...condition, tabId }))
     }
     case 'find': {
       if (!args[0]) throw new Error('find requires a search query')
@@ -278,13 +328,13 @@ async function main() {
       if (!args[0]) throw new Error('sequence requires a JSON steps file')
       const steps = JSON.parse(await readFile(args[0], 'utf8'))
       const tabId = await resolveTabId(args[1])
-      return print(await request('sequence', { steps, tabId }))
+      return printSequence(await request('sequence', { steps, tabId }))
     }
     case 'sequence-json': {
       if (!args[0]) throw new Error('sequence-json requires a JSON array')
       const steps = JSON.parse(args[0])
       const tabId = await resolveTabId(args[1])
-      return print(await request('sequence', { steps, tabId }))
+      return printSequence(await request('sequence', { steps, tabId }))
     }
     case 'fill-enter': {
       if (args.length < 2) throw new Error('fill-enter requires selectorOrPlaceholder and value')
@@ -294,7 +344,7 @@ async function main() {
         { action: 'key', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 },
         { action: 'value', target: args[0] }
       ]
-      return print(await request('sequence', { steps, tabId }))
+      return printSequence(await request('sequence', { steps, tabId }))
     }
     default: throw new Error(`Unknown command: ${command}\n${USAGE}`)
   }
@@ -302,5 +352,6 @@ async function main() {
 
 main().catch(error => {
   process.stderr.write(`ERROR: ${error.message}\n`)
+  if (error.code || error.details) process.stderr.write(JSON.stringify({ code: error.code, details: error.details }) + '\n')
   process.exitCode = 1
 })

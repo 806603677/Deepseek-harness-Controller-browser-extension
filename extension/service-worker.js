@@ -1,6 +1,10 @@
 import { permissionPatternForUrl } from './allowed-origins.js'
 import { createPageTools } from './page-tools.js'
 import { assessWorkflow } from './workflow-advice.js'
+import { conditionOptions, pollCondition } from './conditions.js'
+import { SnapshotCache } from './snapshot-cache.js'
+
+const snapshotCache = new SnapshotCache()
 
 const NATIVE_HOST = 'com.dsh.edge'
 const RECONNECT_ALARM = 'dsh-native-host-reconnect'
@@ -113,6 +117,7 @@ async function claimTab(tabId) {
 
 async function releaseTab(tabId) {
   const numericId = Number(tabId)
+  snapshotCache.clearTab(numericId)
   if (claimedTabs.has(numericId)) {
     try {
       await chrome.debugger.detach({ tabId: numericId })
@@ -171,13 +176,12 @@ async function evaluate(tabId, expression, awaitPromise = true) {
   return result.result?.value ?? result.result
 }
 
-async function waitForReady(tabId, timeoutMs = 60000) {
+async function waitForReady(tabId, timeoutMs = 60000, previousTimeOrigin) {
   const started = Date.now()
   while (Date.now() - started < timeoutMs) {
     try {
-      const state = await evaluate(tabId, 'document.readyState', false)
-      if (state === 'complete') {
-        await new Promise(resolve => setTimeout(resolve, 1200))
+      const state = await evaluate(tabId, '({ ready: document.readyState, timeOrigin: performance.timeOrigin })', false)
+      if (state.ready === 'complete' && (previousTimeOrigin === undefined || state.timeOrigin !== previousTimeOrigin)) {
         return
       }
     } catch {}
@@ -187,7 +191,7 @@ async function waitForReady(tabId, timeoutMs = 60000) {
 }
 
 async function pageAction(tabId, action, ...args) {
-  const supported = new Set(['search', 'state', 'fill', 'blur', 'point', 'snapshot', 'guide'])
+  const supported = new Set(['search', 'state', 'fill', 'blur', 'point', 'snapshot', 'guide', 'probe'])
   if (!supported.has(action)) throw new Error(`Unsupported page action: ${action}`)
   return evaluate(tabId, `(() => {
     const tools = (${createPageTools.toString()})();
@@ -195,10 +199,38 @@ async function pageAction(tabId, action, ...args) {
   })()`)
 }
 
-async function domSnapshot(tabId) {
-  const result = await pageAction(tabId, 'snapshot')
+async function domSnapshot(tabId, options) {
+  const before = await chrome.tabs.get(Number(tabId))
+  const result = await pageAction(tabId, 'snapshot', options)
   const tab = await chrome.tabs.get(Number(tabId))
-  return { ...result, url: sanitizedUrl(tab.url || '') }
+  if (before.url !== tab.url) throw new Error('Page changed while reading the snapshot; read the current page again')
+  const snapshot = result.mode === 'compact' ? snapshotCache.capture(tabId, result, options) : result
+  return { ...snapshot, url: sanitizedUrl(tab.url || '') }
+}
+
+async function waitForCondition(tabId, input) {
+  const options = conditionOptions(input)
+  const origin = new URL((await chrome.tabs.get(Number(tabId))).url).origin
+  const checkOrigin = async () => {
+    await requireClaimed(tabId)
+    if (new URL((await chrome.tabs.get(Number(tabId))).url).origin !== origin) {
+      const error = new Error('Condition crossed a site boundary; stop and inspect the current page')
+      error.code = 'SITE_CHANGED'
+      throw error
+    }
+  }
+  return pollCondition(async current => {
+    await checkOrigin()
+    let observation
+    try { observation = await pageAction(tabId, 'probe', current) }
+    catch (error) {
+      // A navigation may briefly destroy the execution context. Never retry an action.
+      if (!/Execution context was destroyed|Cannot find context with specified id/.test(error.message)) throw error
+      observation = { met: false, actual: { reason: 'page_loading' } }
+    }
+    await checkOrigin()
+    return observation
+  }, options)
 }
 
 async function findElements(tabId, query, limit = 100) {
@@ -219,12 +251,9 @@ async function pageGuide(tabId) {
   }
 }
 
-async function locateElement(tabId, selectorOrText) {
-  return pageAction(tabId, 'point', selectorOrText)
-}
-
-async function clickElement(tabId, selectorOrText) {
-  const point = await locateElement(tabId, selectorOrText)
+async function clickElement(tabId, selectorOrText, timeoutMs = 5000) {
+  const ready = await waitForCondition(tabId, { target: selectorOrText, condition: 'clickable', timeoutMs })
+  const point = ready.actual
   await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y })
   await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
   await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
@@ -252,9 +281,15 @@ async function sendKey(tabId, step) {
   return { sent: key }
 }
 
-async function runSequence(tabId, steps) {
+async function runSequence(tabId, steps, timeoutMs = 100000) {
   if (!Array.isArray(steps) || !steps.length) throw new Error('sequence requires a non-empty steps array')
   if (steps.length > 50) throw new Error('sequence is limited to 50 steps')
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > 100000) throw new Error('sequence timeoutMs must be between 1 and 100000')
+  // Reject malformed assertions before earlier steps can cause side effects.
+  for (const step of steps) {
+    if (['waitFor', 'assert'].includes(step?.action)) conditionOptions(step)
+    if (step?.expect) conditionOptions(step.expect)
+  }
   const started = performance.now()
   const results = []
   const startingOrigin = new URL((await chrome.tabs.get(Number(tabId))).url).origin
@@ -262,13 +297,17 @@ async function runSequence(tabId, steps) {
   for (let index = 0; index < steps.length; index++) {
     const step = steps[index] || {}
     const action = String(step.action || '')
+    const stepStarted = performance.now()
+    const remaining = () => Math.max(0, timeoutMs - (performance.now() - started))
+    let verifying = false
     try {
+      if (!remaining()) throw new Error('Sequence time budget exceeded; no further actions were executed')
       const currentOrigin = new URL((await chrome.tabs.get(Number(tabId))).url).origin
       if (currentOrigin !== startingOrigin) throw new Error('Sequence crossed a site boundary; stop, reload current-site Memory, and start a new sequence')
       let result
       switch (action) {
         case 'click':
-          result = await clickElement(tabId, String(step.target || ''))
+          result = await clickElement(tabId, String(step.target || ''), Math.min(step.timeoutMs ?? 5000, remaining()))
           break
         case 'fill':
           result = await fillElement(tabId, String(step.target || ''), step.value ?? '')
@@ -277,7 +316,7 @@ async function runSequence(tabId, steps) {
           result = await sendKey(tabId, step)
           break
         case 'wait': {
-          const delayMs = Math.max(0, Math.min(Number(step.ms || 0), 10000))
+          const delayMs = Math.max(0, Math.min(Number(step.ms || 0), 10000, remaining()))
           await new Promise(resolve => setTimeout(resolve, delayMs))
           result = { waitedMs: delayMs }
           break
@@ -288,14 +327,24 @@ async function runSequence(tabId, steps) {
         case 'find':
           result = await findElements(tabId, String(step.query || ''), step.limit ?? 100)
           break
+        case 'dom':
+          result = await domSnapshot(tabId, step.options)
+          break
+        case 'waitFor':
+        case 'assert':
+          verifying = true
+          result = await waitForCondition(tabId, { ...step, timeoutMs: Math.min(step.timeoutMs ?? 5000, remaining()) })
+          break
         case 'blur':
           result = await blurElement(tabId, String(step.target || ''))
           break
-        case 'reload':
+        case 'reload': {
+          const previousTimeOrigin = await evaluate(tabId, 'performance.timeOrigin', false)
           await cdp(tabId, 'Page.reload', { ignoreCache: Boolean(step.ignoreCache) })
-          await waitForReady(tabId, Math.min(Number(step.timeoutMs || 60000), 120000))
+          await waitForReady(tabId, Math.min(Number(step.timeoutMs || 60000), remaining()), previousTimeOrigin)
           result = tabSummary(await chrome.tabs.get(Number(tabId)))
           break
+        }
         case 'eval':
           result = await evaluate(tabId, String(step.expression || ''), step.awaitPromise !== false)
           break
@@ -305,16 +354,28 @@ async function runSequence(tabId, steps) {
         default:
           throw new Error(`Unsupported sequence action: ${action}`)
       }
-      results.push({ index, action, ok: true, result })
+      if (step.expect) {
+        verifying = true
+        if (new URL((await chrome.tabs.get(Number(tabId))).url).origin !== startingOrigin) throw new Error('Sequence crossed a site boundary before verification')
+        const verification = await waitForCondition(tabId, { ...step.expect, timeoutMs: Math.min(step.expect.timeoutMs ?? 5000, remaining()) })
+        result = { actionResult: result, verification }
+      }
+      results.push({ index, action, ok: true, elapsedMs: Math.round(performance.now() - stepStarted), result })
     } catch (error) {
-      results.push({ index, action, ok: false, error: error?.message || String(error) })
-      const currentOrigin = new URL((await chrome.tabs.get(Number(tabId))).url).origin
-      if (currentOrigin !== startingOrigin || step.continueOnError !== true) break
+      results.push({ index, action, ok: false, elapsedMs: Math.round(performance.now() - stepStarted),
+        phase: verifying ? 'verification' : 'action', error: error?.message || String(error),
+        ...(error.code ? { code: error.code } : {}), ...(error.details ? { details: error.details } : {}) })
+      let currentOrigin
+      try { currentOrigin = new URL((await chrome.tabs.get(Number(tabId))).url).origin } catch { currentOrigin = null }
+      if (verifying || !remaining() || currentOrigin !== startingOrigin || step.continueOnError !== true) break
     }
   }
 
-  const endingOrigin = new URL((await chrome.tabs.get(Number(tabId))).url).origin
+  let endingOrigin
+  try { endingOrigin = new URL((await chrome.tabs.get(Number(tabId))).url).origin } catch { endingOrigin = null }
   return { elapsedMs: Math.round(performance.now() - started), steps: results,
+    success: results.length === steps.length && results.every(step => step.ok) && endingOrigin === startingOrigin,
+    completed: results.length === steps.length, failedIndex: results.find(step => !step.ok)?.index ?? null,
     siteChanged: endingOrigin !== startingOrigin,
     reminder: endingOrigin !== startingOrigin ? 'Stop here; load the destination site context before another action.' : undefined }
 }
@@ -322,7 +383,7 @@ async function runSequence(tabId, steps) {
 async function executeRequest(message, source = 'native') {
   await accessReady
   const params = message.params || {}
-  const tabScopedMethods = new Set(['navigate', 'reload', 'dom', 'find', 'guide', 'advise', 'text', 'eval', 'screenshot', 'click', 'fill', 'blur', 'key', 'value', 'sequence'])
+  const tabScopedMethods = new Set(['navigate', 'reload', 'dom', 'find', 'guide', 'advise', 'text', 'eval', 'screenshot', 'click', 'fill', 'blur', 'key', 'value', 'sequence', 'waitFor', 'assert'])
   if (tabScopedMethods.has(message.method)) await ensureClaimed(params.tabId)
   switch (message.method) {
     case 'status':
@@ -351,18 +412,24 @@ async function executeRequest(message, source = 'native') {
     case 'navigate': {
       const tabId = Number(params.tabId)
       if (!await siteIsAllowed(params.url)) throw new Error('URL is outside user-approved sites')
-      await cdp(tabId, 'Page.navigate', { url: params.url })
-      await waitForReady(tabId)
+      const previousTimeOrigin = await evaluate(tabId, 'performance.timeOrigin', false)
+      const navigation = await cdp(tabId, 'Page.navigate', { url: params.url })
+      if (navigation.errorText) throw new Error(`Navigation failed: ${navigation.errorText}`)
+      await waitForReady(tabId, 60000, navigation.loaderId ? previousTimeOrigin : undefined)
       return tabSummary(await chrome.tabs.get(tabId))
     }
     case 'reload': {
       const tabId = Number(params.tabId)
+      const previousTimeOrigin = await evaluate(tabId, 'performance.timeOrigin', false)
       await cdp(tabId, 'Page.reload', { ignoreCache: Boolean(params.ignoreCache) })
-      await waitForReady(tabId, Math.min(Number(params.timeoutMs || 60000), 120000))
+      await waitForReady(tabId, Math.min(Number(params.timeoutMs || 60000), 120000), previousTimeOrigin)
       return tabSummary(await chrome.tabs.get(tabId))
     }
     case 'dom':
-      return domSnapshot(params.tabId)
+      return domSnapshot(params.tabId, params.options)
+    case 'waitFor':
+    case 'assert':
+      return waitForCondition(params.tabId, params)
     case 'find':
       return findElements(params.tabId, String(params.query || ''), params.limit ?? 100)
     case 'guide':
@@ -389,7 +456,7 @@ async function executeRequest(message, source = 'native') {
     case 'value':
       return elementState(params.tabId, String(params.selectorOrPlaceholder || ''))
     case 'sequence':
-      return runSequence(params.tabId, params.steps)
+      return runSequence(params.tabId, params.steps, params.timeoutMs)
     default:
       throw new Error(`Unsupported DSH Edge method: ${message.method}`)
   }
@@ -401,7 +468,8 @@ async function handleNativeRequest(message) {
     const result = await executeRequest(message)
     nativePort?.postMessage({ type: 'response', requestId: message.requestId, ok: true, result })
   } catch (error) {
-    nativePort?.postMessage({ type: 'response', requestId: message.requestId, ok: false, error: error?.message || String(error) })
+    nativePort?.postMessage({ type: 'response', requestId: message.requestId, ok: false, error: error?.message || String(error),
+      ...(error.code ? { code: error.code } : {}), ...(error.details ? { details: error.details } : {}) })
   }
 }
 
@@ -417,16 +485,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.debugger.onDetach.addListener(source => {
   if (source.tabId == null) return
   claimedTabs.delete(source.tabId)
+  snapshotCache.clearTab(source.tabId)
   saveClaims().catch(() => {})
   chrome.action.setBadgeText({ tabId: source.tabId, text: '' }).catch(() => {})
 })
 
 chrome.tabs.onRemoved.addListener(tabId => {
+  snapshotCache.clearTab(tabId)
   if (!claimedTabs.delete(tabId)) return
   saveClaims().catch(() => {})
 })
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.url || changeInfo.status === 'loading') snapshotCache.clearTab(tabId)
   if (!claimedTabs.has(tabId) || !changeInfo.url) return
   accessReady.then(() => siteIsAllowed(changeInfo.url)).then(allowed => {
     if (!allowed) return releaseTab(tabId)

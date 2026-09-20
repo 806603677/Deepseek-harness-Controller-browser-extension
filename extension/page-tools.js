@@ -5,7 +5,13 @@ export function createPageTools() {
   const MAX_CONTEXT_DEPTH = 5
   const MAX_NODES_PER_CONTEXT = 20000
   let scanTruncated = false
-  const visible = el => !!(el.getClientRects().length || el.offsetWidth || el.offsetHeight)
+  const visible = el => {
+    if (!el.isConnected || !el.getClientRects().length) return false
+    const style = el.ownerDocument.defaultView.getComputedStyle(el)
+    if (style.visibility === 'hidden' || style.visibility === 'collapse') return false
+    const frame = el.ownerDocument.defaultView.frameElement
+    return !frame || visible(frame)
+  }
   const trim = value => String(value ?? '').trim()
   const textOf = el => ['password', 'hidden'].includes(el.type) ? '' : trim(el.innerText || el.textContent || el.value).slice(0, 300)
   const cssEscape = value => CSS.escape(String(value))
@@ -33,14 +39,14 @@ export function createPageTools() {
     return segments.join(' > ')
   }
 
-  function contexts() {
+  function contexts(scopeItem) {
     const found = []
-    function visit(root, steps, frames, depth) {
-      found.push({ root, steps, frames })
-      if (depth >= MAX_CONTEXT_DEPTH) return
-      const candidates = root.querySelectorAll('*')
+    function visit(root, steps, frames, depth, queryRoot = root) {
+      found.push({ root, steps, frames, queryRoot })
+      if (depth >= MAX_CONTEXT_DEPTH) { scanTruncated = true; return }
+      const candidates = queryRoot.querySelectorAll('*')
       if (candidates.length > MAX_NODES_PER_CONTEXT) scanTruncated = true
-      const nodes = [...candidates].slice(0, MAX_NODES_PER_CONTEXT)
+      const nodes = [ ...(queryRoot.nodeType === 1 ? [queryRoot] : []), ...candidates ].slice(0, MAX_NODES_PER_CONTEXT)
       for (const node of nodes) {
         if (node.shadowRoot) visit(node.shadowRoot,
           [...steps, `shadow=${selectorFor(node, root)}`], frames, depth + 1)
@@ -52,7 +58,8 @@ export function createPageTools() {
         }
       }
     }
-    visit(document, [], [], 0)
+    if (scopeItem) visit(scopeItem.context.root, scopeItem.context.steps, scopeItem.context.frames, 0, scopeItem.el)
+    else visit(document, [], [], 0)
     return found
   }
 
@@ -114,11 +121,13 @@ export function createPageTools() {
     }
   }
 
-  function allElements() {
-    return contexts().flatMap(context => {
-      const candidates = context.root.querySelectorAll(SELECTOR)
+  function allElements(scopeItem, selector = SELECTOR) {
+    return contexts(scopeItem).flatMap(context => {
+      const candidates = context.queryRoot.querySelectorAll(selector)
       if (candidates.length > MAX_NODES_PER_CONTEXT) scanTruncated = true
-      return [...candidates].slice(0, MAX_NODES_PER_CONTEXT).map(el => ({ el, context }))
+      const nodes = [...candidates].slice(0, MAX_NODES_PER_CONTEXT)
+      if (context.queryRoot.nodeType === 1 && context.queryRoot.matches(selector)) nodes.unshift(context.queryRoot)
+      return nodes.map(el => ({ el, context }))
     })
   }
 
@@ -133,8 +142,10 @@ export function createPageTools() {
       if (separator < 1) throw new Error(`Invalid locator part: ${part}`)
       const kind = part.slice(0, separator)
       const selector = part.slice(separator + 1)
-      const el = root.querySelector(selector)
-      if (!el) throw new Error(`Locator segment not found: ${part}`)
+      const candidates = root.querySelectorAll(selector)
+      if (candidates.length > 1) throw new Error(`Ambiguous locator segment: ${part}`)
+      const el = candidates[0]
+      if (!el) return null
       if (kind === 'frame') {
         if (el.tagName !== 'IFRAME' || !el.contentDocument) throw new Error('Frame is not same-origin or available')
         frames.push(el)
@@ -181,7 +192,11 @@ export function createPageTools() {
     const raw = trim(query)
     if (!raw) throw new Error('Target is required')
     const exact = explicitLocator(raw)
-    if (exact) return exact
+    if (exact) {
+      if (!visible(exact.el)) throw new Error(`Visible element not found: ${raw}`)
+      return exact
+    }
+    if (raw.includes(' >>> ')) throw new Error(`Locator segment not found: ${raw}`)
     const prefixed = /^(label|placeholder|role|name|id|text|css)=(.*)$/s.exec(raw)
     const kind = prefixed?.[1] || 'any'
     const needle = prefixed ? prefixed[2] : raw
@@ -283,7 +298,8 @@ export function createPageTools() {
     return { x, y, tag: el.tagName, text: textOf(el), locator: describe(el, context).locator }
   }
 
-  function snapshot() {
+  function snapshot(options) {
+    if (options && Object.keys(options).length) return compactSnapshot(options)
     const elements = allElements().map(item => describe(item.el, item.context))
     const inputs = elements.filter(item => ['input', 'textarea', 'select'].includes(item.tag))
       .map((item, index) => ({ ...item, index }))
@@ -301,6 +317,145 @@ export function createPageTools() {
       buttonsCount: buttons.length,
       bodyText: (document.body?.innerText || '').slice(0, 12000)
     }
+  }
+
+  function compactSnapshot(options) {
+    if (Array.isArray(options) || typeof options !== 'object') throw new Error('Snapshot options must be an object')
+    const optionNames = ['mode', 'scope', 'selector', 'fields', 'limit', 'textLimit', 'includeValues', 'includeText', 'since']
+    if (Object.keys(options).some(key => !optionNames.includes(key))) throw new Error('Unknown snapshot option')
+    if (options.mode !== undefined && options.mode !== 'compact') throw new Error('Snapshot mode must be compact')
+    for (const key of ['scope', 'selector', 'since']) {
+      if (options[key] !== undefined && (typeof options[key] !== 'string' || !options[key].trim())) throw new Error(`${key} must be a non-empty string`)
+    }
+    for (const key of ['includeValues', 'includeText']) {
+      if (options[key] !== undefined && typeof options[key] !== 'boolean') throw new Error(`${key} must be boolean`)
+    }
+    const limit = options.limit ?? 100
+    const textLimit = options.textLimit ?? 2000
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error('limit must be an integer from 1 to 500')
+    if (!Number.isInteger(textLimit) || textLimit < 0 || textLimit > 12000) throw new Error('textLimit must be an integer from 0 to 12000')
+    const allowed = ['locator', 'tag', 'role', 'type', 'id', 'name', 'labels', 'placeholder', 'ariaLabel', 'text', 'href', 'value', 'checked', 'disabled', 'visible', 'contentEditable', 'frameDepth']
+    const fields = options.fields ?? ['locator', 'role', 'labels', 'text', 'checked', 'disabled', ...(options.includeValues ? ['value'] : [])]
+    if (!Array.isArray(fields) || fields.some(field => !allowed.includes(field))) throw new Error('Unknown snapshot field')
+    const scope = options.scope ? resolve(options.scope) : null
+    const items = allElements(scope, options.selector || SELECTOR).filter(item => visible(item.el))
+    const selectedFields = [...new Set(['locator', ...fields])]
+    const elements = items.slice(0, limit).map(item => {
+      const d = describe(item.el, item.context)
+      // A compact structural read must not leak an input value through textOf's fallback.
+      if (['input', 'textarea', 'select'].includes(d.tag) || d.contentEditable) d.text = ''
+      return Object.fromEntries(selectedFields.filter(field => field !== 'value' || options.includeValues === true)
+        .filter(field => d[field] !== undefined).map(field => [field, d[field]]))
+    })
+    const rawText = options.includeText === true ? (scope?.el || document.body)?.innerText || '' : ''
+    return {
+      title: document.title, ready: document.readyState, mode: 'compact', scope: options.scope || null,
+      elements, elementsCount: items.length, returnedCount: elements.length,
+      truncated: scanTruncated || items.length > limit, scanTruncated,
+      ...(options.includeText === true ? { bodyText: rawText.slice(0, textLimit), textTruncated: rawText.length > textLimit } : {}),
+      // Consumed by the worker for in-memory baseline isolation; never returned to the client.
+      documentKey: `${performance.timeOrigin}:${location.href}`
+    }
+  }
+
+  function conditionItems(target) {
+    const raw = trim(target)
+    if (!raw) throw new Error('Condition target is required')
+    if (raw.includes(' >>> ')) {
+      const item = explicitLocator(raw)
+      return item ? [item] : []
+    }
+    const prefixed = /^(label|placeholder|role|name|id|text|css)=(.*)$/s.exec(raw)
+    const kind = prefixed?.[1] || 'any'
+    const needle = prefixed ? prefixed[2] : raw
+    if (kind === 'css' || kind === 'any') {
+      try {
+        const found = allElements(null, needle)
+        if (found.length || kind === 'css') return found
+      } catch (error) { if (kind === 'css') throw error }
+    }
+    const found = allElements().filter(item => matches(item, kind, needle))
+    const exact = found.filter(item => {
+      const d = describe(item.el, item.context)
+      return [d.text, d.ariaLabel, d.placeholder, d.name, d.id, d.role, ...d.labels]
+        .some(field => field.toLocaleLowerCase() === needle.toLocaleLowerCase())
+    })
+    return exact.length ? exact : found
+  }
+
+  function clickablePoint(item) {
+    const { el, context } = item
+    if (!visible(el)) return { clickable: false, reason: 'hidden' }
+    if (el.matches(':disabled') || el.getAttribute('aria-disabled') === 'true' || el.closest('[inert]')) {
+      return { clickable: false, reason: 'disabled' }
+    }
+    el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' })
+    const rect = el.getBoundingClientRect()
+    let x = rect.left + rect.width / 2
+    let y = rect.top + rect.height / 2
+    const hits = (root, node, px, py) => {
+      const hit = root.elementFromPoint(px, py)
+      return hit === node || node.contains(hit)
+    }
+    let node = el
+    while (true) {
+      const root = node.getRootNode()
+      if (!hits(root, node, x, y)) return { clickable: false, reason: 'covered', locator: describe(el, context).locator }
+      if (!root.host) break
+      node = root.host
+    }
+    const geometry = [[rect.x, rect.y, rect.width, rect.height]]
+    for (const frame of [...context.frames].reverse()) {
+      frame.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' })
+      const r = frame.getBoundingClientRect()
+      // Transformed frames need a dedicated coordinate adapter; fail instead of guessing.
+      if (frame.ownerDocument.defaultView.getComputedStyle(frame).transform !== 'none') return { clickable: false, reason: 'transformed_frame' }
+      x += r.left + frame.clientLeft
+      y += r.top + frame.clientTop
+      geometry.push([r.x, r.y, r.width, r.height])
+      node = frame
+      while (true) {
+        const root = node.getRootNode()
+        if (!hits(root, node, x, y)) return { clickable: false, reason: 'covered_frame' }
+        if (!root.host) break
+        node = root.host
+      }
+    }
+    return { clickable: true, x, y, geometry, locator: describe(el, context).locator }
+  }
+
+  function probe(options) {
+    const condition = options.condition || 'visible'
+    const supported = ['visible', 'hidden', 'attached', 'detached', 'enabled', 'disabled', 'clickable', 'value', 'text', 'checked', 'count']
+    if (!supported.includes(condition)) throw new Error(`Unknown condition: ${condition}`)
+    const items = conditionItems(options.target)
+    if (scanTruncated) throw new Error('Condition scan was truncated; narrow the target with an explicit frame/shadow locator')
+    if (condition === 'count') return { met: items.length === options.equals, actual: items.length }
+    if (['visible', 'hidden', 'attached', 'detached'].includes(condition)) {
+      const actual = { count: items.length, visibleCount: items.filter(item => visible(item.el)).length }
+      if (condition === 'hidden') return { met: actual.visibleCount === 0, actual }
+      if (condition === 'detached') return { met: actual.count === 0, actual }
+      if (items.length > 1) throw new Error(`Ambiguous condition target (${items.length} matches); use an exact locator`)
+      return { met: condition === 'visible' ? actual.visibleCount === 1 : actual.count === 1, actual }
+    }
+    if (items.length > 1) throw new Error(`Ambiguous condition target (${items.length} matches); use an exact locator`)
+    if (!items.length) return { met: false, actual: { count: 0 } }
+    const { el } = items[0]
+    if (['password', 'hidden'].includes(el.type) && ['value', 'text'].includes(condition)) throw new Error('Conditions cannot inspect password or hidden values')
+    if (condition === 'clickable') {
+      const actual = clickablePoint(items[0])
+      return { met: actual.clickable, actual }
+    }
+    let actual
+    if (condition === 'enabled' || condition === 'disabled') {
+      actual = Boolean(el.matches(':disabled') || el.getAttribute('aria-disabled') === 'true' || el.closest('[inert]'))
+      return { met: visible(el) && (condition === 'disabled' ? actual : !actual), actual: { disabled: actual } }
+    }
+    if (condition === 'value') actual = valueOf(el)
+    if (condition === 'text') actual = trim(el.innerText || el.textContent)
+    if (condition === 'checked') actual = 'checked' in el ? Boolean(el.checked) : el.getAttribute('aria-checked') === 'true'
+    const met = options.includes !== undefined ? String(actual ?? '').includes(options.includes) : actual === options.equals
+    return { met, actual: typeof actual === 'string' ? actual.slice(0, 1000) : actual }
   }
 
   function guide() {
@@ -338,5 +493,5 @@ export function createPageTools() {
     }
   }
 
-  return { search, state, fill, blur, point, snapshot, guide }
+  return { search, state, fill, blur, point, snapshot, guide, probe }
 }

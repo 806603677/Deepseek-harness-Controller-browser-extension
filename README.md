@@ -77,6 +77,69 @@ node .\scripts\dsh-edge.mjs release <tabId>
 ]
 ```
 
+## 条件等待、精简快照与批量核对
+
+修改扩展源码后，需要在浏览器扩展管理页重新加载本扩展，新功能才会生效。原来的 `dom <tabId>` 和步骤数组用法保留。
+
+### 条件等待
+
+新增 `wait-for <condition.json> <tabId>` 和 `assert <condition.json> <tabId>`；前者等待页面状态，后者用于结果核对。两者都只重复读取条件，不重复点击或填写。条件 JSON 示例：
+
+```json
+{ "target": "css=#result", "condition": "text", "equals": "done", "timeoutMs": 5000 }
+```
+
+- 支持 `visible`、`hidden`、`attached`、`detached`、`enabled`、`disabled`、`clickable`、`value`、`text`、`checked`、`count`。
+- `value/text` 使用字符串 `equals` 或 `includes`；`checked` 使用布尔 `equals`；`count` 使用非负整数 `equals`。其余条件不需要比较值。
+- 默认等待 5000 毫秒、每 100 毫秒检查一次；`timeoutMs` 范围 0–60000，`intervalMs` 范围 20–1000。`timeoutMs: 0` 表示立即核对一次；`clickable` 需要至少 100 毫秒的位置稳定观察。
+- `hidden` 表示所有匹配元素均不可见或已移除；`detached` 表示没有匹配元素；`count` 包含隐藏元素。其他条件要求唯一匹配，多个匹配直接报告歧义。文本比较去除首尾空白，不折叠内部空白。
+- `click` 现在先等待元素可见、启用、中心点未被遮挡且位置稳定，再发送一次点击。浏览器导航/刷新等待新文档完成，不再额外固定等待 1.2 秒；网页自身的异步数据需用明确的 `waitFor` 条件核对。
+- 条件超时返回 `CONDITION_TIMEOUT`、预期值、最后观察值、尝试次数和耗时。密码和隐藏输入的值不能用条件探测。跨网站时立即停止等待。
+
+### 局部精简读取和变化读取
+
+以下选项均为可选；提供任一选项即使用精简模式。也可以把选项写为 JSON，通过 `dom-options <options.json> <tabId>` 调用。
+
+```powershell
+node .\scripts\dsh-edge.mjs dom <tabId> --compact
+node .\scripts\dsh-edge.mjs dom <tabId> --scope 'css=#panel' --limit 30
+node .\scripts\dsh-edge.mjs dom <tabId> --scope 'css=#panel' --selector 'input,button' --fields 'locator,labels,value,disabled' --values
+node .\scripts\dsh-edge.mjs dom <tabId> --scope 'css=#result' --text --text-limit 1000
+```
+
+精简模式只返回一份 `elements`，默认最多 100 个元素，不附整页正文或输入值。`--scope` 指定唯一可见容器，支持精确 frame/shadow 定位器；`--selector` 筛选容器内的 CSS 元素，可用于表格行等非交互节点；`--fields` 限定返回属性，始终保留 `locator`。输入值需显式使用 `--values`，密码仍遮蔽。`--text` 明确请求可见正文，默认上限 2000 字符。结果提供实际数量、返回数量和截断标记；精简读取不是整页完整性证明。
+
+首次精简读取返回 `snapshotId`。下次使用同样的读取选项，并附加 `--since <snapshotId>`，返回新增 `added`、变化后的 `changed` 和被移除定位器 `removed`；正文改变时返回新的正文片段。每次使用最新返回的 `snapshotId`。比较基于定位器，列表重排可能表现为字段变化。
+
+基线仅保存在扩展后台内存，最多 20 份，有效期 5 分钟，不写磁盘或浏览器存储。换页、刷新、释放标签、重载扩展、选项变化、基线过期或快照截断时，返回完整精简快照以及 `reset/resetReason`，调用方必须据此建立新基线，不得把缺失内容误判为删除。不同标签不能共用基线。
+
+### 批量结果核对
+
+`sequence` 新增 `waitFor`、`assert`、`dom` 步骤，操作步骤还可附带 `expect`。例如在本地测试表单运行：
+
+```json
+[
+  { "action": "fill", "target": "css=#name", "value": "example",
+    "expect": { "target": "css=#name", "condition": "value", "equals": "example" } },
+  { "action": "click", "target": "css=#query" },
+  { "action": "waitFor", "target": "css=#result", "condition": "text", "equals": "done" },
+  { "action": "assert", "target": "css=#result", "condition": "text", "includes": "done" },
+  { "action": "dom", "options": { "mode": "compact", "scope": "css=#panel", "limit": 20 } }
+]
+```
+
+条件核对失败始终停止后续步骤，即使配置了 `continueOnError`；此前已完成的操作不会回滚。结果新增 `success`、`completed`（是否尝试了全部步骤）、`failedIndex`（从 0 开始）、逐步耗时和失败阶段。命令行在 `success: false` 时返回非零退出码，仍输出完整结果。默认步骤调度预算 100 秒，等待受剩余预算限制；已发出的浏览器动作或任意 `eval` 不能被此预算强制取消。业务保存或提交仍需具体授权和持久化回读，DOM 值匹配本身不等于保存成功。
+
+### 新功能回归测试
+
+```powershell
+npm test
+$env:DSH_TEST_BROWSER='C:\Program Files\Google\Chrome\Application\chrome.exe'
+npm run test:browser
+```
+
+`npm test` 包括参数传递、失败退出码、通信失败不重放、条件等待和快照隔离检查，以及原有回归测试。`test:browser` 使用独立临时浏览器配置、本地虚构表单和随机本地调试端口，验证真实 DOM 和鼠标事件；不会连接使用者已打开的浏览器，不加载真实业务页面。它通过测试适配器连接扩展执行逻辑，不能替代重新加载扩展后的 Native Host 全链路实机验收。需要本机 Chromium/Chrome/Edge，可用 `DSH_TEST_BROWSER` 指定可执行文件。
+
 ## 跨网站字段定位与边界
 
 要先做网页结构说明，可运行 `guide <tabId>`：它返回当前来源、路径模板、可见表单字段的标签/角色/定位器和主要功能入口，不包含表单字段值；在动态页面上需再次核对。它不会自己创建 Memory。示范工程的 `site-context.mjs` 将每个来源、每个路径分别路由到对应 Memory；切站或换页时提示 Agent 清除旧页面假设。若需要判断是否值得把已验证的重复工作升级为精简流程，按 [示范工程设置说明](examples/agent-workspace/SETUP.md) 准备证据 JSON，再运行 `advise <evidence.json> <tabId>`。建议只依据已完成、已验证的次数，不把“反复打开过网页”算作成功流程。`advise` 仅给成本/收益判断；用户明确同意前不得写入站点 Skill。慢模型尤其应缩小 Skill，避免阅读成本超过操作节省时间。
