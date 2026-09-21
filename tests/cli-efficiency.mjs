@@ -38,6 +38,10 @@ try {
   const compact = JSON.parse((await cli(['dom', '42', '--compact', '--scope', 'css=#panel', '--fields', 'text,value', '--values', '--limit', '5', '--since', 'baseline'])).stdout)
   assert.deepEqual(compact.received, { tabId: '42', options: { mode: 'compact', scope: 'css=#panel', fields: ['text', 'value'], includeValues: true, limit: 5, since: 'baseline' } })
   assert.deepEqual(JSON.parse((await cli(['dom', '42'])).stdout).received, { tabId: '42' })
+  assert.deepEqual(JSON.parse((await cli(['dom', '42', '--full'])).stdout).received, { tabId: '42', options: { mode: 'full' } })
+  assert.deepEqual(JSON.parse((await cli(['dom', '42', '--focus', 'css=#panel'])).stdout).received,
+    { tabId: '42', options: { mode: 'focus', target: 'css=#panel' } })
+  await assert.rejects(cli(['dom', '42', '--full', '--text']), /cannot be combined/)
   const condition = path.join(temp, 'condition.json')
   await writeFile(condition, JSON.stringify({ target: 'css=#result', condition: 'text', equals: 'done', timeoutMs: 500 }))
   await cli(['wait-for', condition, '42'])

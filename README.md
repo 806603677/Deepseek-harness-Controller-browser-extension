@@ -77,9 +77,9 @@ node .\scripts\dsh-edge.mjs release <tabId>
 ]
 ```
 
-## 条件等待、精简快照与批量核对
+## 条件等待、自适应读取与批量核对
 
-修改扩展源码后，需要在浏览器扩展管理页重新加载本扩展，新功能才会生效。原来的 `dom <tabId>` 和步骤数组用法保留。
+修改扩展源码后，需要在浏览器扩展管理页重新加载本扩展，新功能才会生效。步骤数组用法保留；`dom <tabId>` 现在默认由读取策略自动选择关键帧、操作焦点或变化帧。需要旧版完整结果时使用 `--full`。
 
 ### 条件等待
 
@@ -96,22 +96,25 @@ node .\scripts\dsh-edge.mjs release <tabId>
 - `click` 现在先等待元素可见、启用、中心点未被遮挡且位置稳定，再发送一次点击。浏览器导航/刷新等待新文档完成，不再额外固定等待 1.2 秒；网页自身的异步数据需用明确的 `waitFor` 条件核对。
 - 条件超时返回 `CONDITION_TIMEOUT`、预期值、最后观察值、尝试次数和耗时。密码和隐藏输入的值不能用条件探测。跨网站时立即停止等待。
 
-### 局部精简读取和变化读取
+### 自适应、局部和完整读取
 
-以下选项均为可选；提供任一选项即使用精简模式。也可以把选项写为 JSON，通过 `dom-options <options.json> <tabId>` 调用。
+无选项的 `dom` 默认使用自适应模式。首次读取、基线超过 2 分钟或连续 12 个变化帧后返回关键帧；`click`、`fill`、`blur` 后优先读取目标所在的表单、表格行、对话框或分区；稳定页面返回相对上一关键帧的变化。页面变化超过基线元素的 35% 时重新建立关键帧。换页、刷新、释放标签或扩展重载也会清除状态。
 
 ```powershell
+node .\scripts\dsh-edge.mjs dom <tabId>
+node .\scripts\dsh-edge.mjs dom <tabId> --full
 node .\scripts\dsh-edge.mjs dom <tabId> --compact
+node .\scripts\dsh-edge.mjs dom <tabId> --focus 'css=#name'
 node .\scripts\dsh-edge.mjs dom <tabId> --scope 'css=#panel' --limit 30
 node .\scripts\dsh-edge.mjs dom <tabId> --scope 'css=#panel' --selector 'input,button' --fields 'locator,labels,value,disabled' --values
 node .\scripts\dsh-edge.mjs dom <tabId> --scope 'css=#result' --text --text-limit 1000
 ```
 
-精简模式只返回一份 `elements`，默认最多 100 个元素，不附整页正文或输入值。`--scope` 指定唯一可见容器，支持精确 frame/shadow 定位器；`--selector` 筛选容器内的 CSS 元素，可用于表格行等非交互节点；`--fields` 限定返回属性，始终保留 `locator`。输入值需显式使用 `--values`，密码仍遮蔽。`--text` 明确请求可见正文，默认上限 2000 字符。结果提供实际数量、返回数量和截断标记；精简读取不是整页完整性证明。
+每次自适应读取都返回 `read.mode`、触发原因、可信度、决策耗时、提取耗时、变化比例、输出字节数和下一步建议。焦点不存在或不唯一时，控制器在同一次调用中回退到关键帧并记录 `fallbackFrom`。精简模式只返回一份 `elements`；`--scope` 指定唯一可见容器，支持精确 frame/shadow 定位器；`--selector` 筛选容器内的 CSS 元素；`--fields` 限定返回属性，始终保留 `locator`。输入值需显式使用 `--values`，密码仍遮蔽。精简读取不是整页完整性证明，审计、完整性核对或诊断遗漏时应显式使用 `--full`。
 
 首次精简读取返回 `snapshotId`。下次使用同样的读取选项，并附加 `--since <snapshotId>`，返回新增 `added`、变化后的 `changed` 和被移除定位器 `removed`；正文改变时返回新的正文片段。每次使用最新返回的 `snapshotId`。比较基于定位器，列表重排可能表现为字段变化。
 
-基线仅保存在扩展后台内存，最多 20 份，有效期 5 分钟，不写磁盘或浏览器存储。换页、刷新、释放标签、重载扩展、选项变化、基线过期或快照截断时，返回完整精简快照以及 `reset/resetReason`，调用方必须据此建立新基线，不得把缺失内容误判为删除。不同标签不能共用基线。
+基线仅保存在扩展后台内存，最多 20 份，有效期 5 分钟，不写磁盘或浏览器存储。换页、刷新、释放标签、重载扩展、选项变化、基线过期或基线采集截断时，返回完整精简快照以及 `reset/resetReason`，调用方必须据此建立新基线，不得把缺失内容误判为删除。返回数量上限与内部比较基线上限分开，默认关键帧最多返回 120 个元素、比较 500 个元素。不同标签不能共用基线。
 
 ### 批量结果核对
 
@@ -136,9 +139,11 @@ node .\scripts\dsh-edge.mjs dom <tabId> --scope 'css=#result' --text --text-limi
 npm test
 $env:DSH_TEST_BROWSER='C:\Program Files\Google\Chrome\Application\chrome.exe'
 npm run test:browser
+$env:DSH_BENCHMARK_OUTPUT='..\work\tasks\adaptive-dom-read\isolated-benchmark.json'
+npm run benchmark:read
 ```
 
-`npm test` 包括参数传递、失败退出码、通信失败不重放、条件等待和快照隔离检查，以及原有回归测试。`test:browser` 使用独立临时浏览器配置、本地虚构表单和随机本地调试端口，验证真实 DOM 和鼠标事件；不会连接使用者已打开的浏览器，不加载真实业务页面。它通过测试适配器连接扩展执行逻辑，不能替代重新加载扩展后的 Native Host 全链路实机验收。需要本机 Chromium/Chrome/Edge，可用 `DSH_TEST_BROWSER` 指定可执行文件。
+`npm test` 包括读取策略、参数传递、失败退出码、通信失败不重放、条件等待和快照隔离检查，以及原有回归测试。`test:browser` 使用独立临时浏览器配置、本地虚构表单和随机本地调试端口，验证真实 DOM 和鼠标事件；不会连接使用者已打开的浏览器，不加载真实业务页面。`benchmark:read` 在 12、60、150 行的虚构页面上每种模式各重复 40 次并交替比较完整与自适应流程，检查正确率、逐场景中位数和 P95 耗时、输出量、调用次数及补读率。其 token 数是可复现估算值；是否正式发布为默认模式仍需同一模型的实际 usage token 复测。以上测试通过适配器连接扩展执行逻辑，不能替代重新加载扩展后的 Native Host 全链路实机验收。需要本机 Chromium/Chrome/Edge，可用 `DSH_TEST_BROWSER` 指定可执行文件。
 
 ## 跨网站字段定位与边界
 

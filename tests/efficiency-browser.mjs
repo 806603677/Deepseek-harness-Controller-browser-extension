@@ -72,8 +72,23 @@ try {
     checks++
     return response
   }
-  const legacy = await ok('dom')
+  const legacy = await ok('dom', { options: { mode: 'full' } })
   assert.ok(legacy.inputs && legacy.buttons && legacy.bodyText)
+  assert.equal(legacy.read.mode, 'full')
+  const autoKeyframe = await ok('dom')
+  assert.equal(autoKeyframe.read.mode, 'keyframe')
+  assert.equal(autoKeyframe.read.reason, 'baseline_missing')
+  assert.equal(autoKeyframe.baselineElements, undefined)
+  assert.ok(autoKeyframe.snapshotId)
+  const autoDelta = await ok('dom')
+  assert.equal(autoDelta.read.mode, 'delta')
+  assert.equal(autoDelta.mode, 'diff')
+  await ok('fill', { selectorOrPlaceholder: 'css=#name', value: 'auto' })
+  const autoFocus = await ok('dom')
+  assert.equal(autoFocus.read.mode, 'focus')
+  assert.equal(autoFocus.scope, 'css=#panel')
+  assert.equal(autoFocus.elements.some(el => el.locator === 'css=#name'), true)
+  await evaluate(`document.querySelector('#name').value='old'`)
   const options = { mode: 'compact', scope: 'css=#panel', fields: ['locator', 'text', 'value'], includeValues: true, limit: 100 }
   const compact = await ok('dom', { options })
   assert.equal(compact.elements.some(el => el.text === 'Outside button'), false)
@@ -154,7 +169,7 @@ try {
   assert.notEqual(await evaluate('performance.timeOrigin'), oldDocument)
   assert.equal(await evaluate('window.clicks'), 0, 'reload waits for the new document')
   const afterReload = await ok('dom', { options: { ...options, since: reset.snapshotId } })
-  assert.equal(afterReload.resetReason, 'page_changed')
+  assert.equal(afterReload.resetReason, 'baseline_missing')
   await ok('navigate', { url: url + 'next' })
   assert.equal(await evaluate('location.pathname'), '/next')
   await ok('navigate', { url: url + 'next#section' })

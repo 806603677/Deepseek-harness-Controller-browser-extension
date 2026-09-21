@@ -5,7 +5,8 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "test": "node tests/allowed-origins.mjs && node tests/access-policy-worker.mjs && node tests/workflow-advice.mjs && node tests/site-context-isolation.mjs && node tests/example-skill-layout.mjs && node tests/conditions.mjs && node tests/cli-efficiency.mjs && node tests/bridge-roundtrip.mjs",
-    "test:browser": "node tests/efficiency-browser.mjs"
+    "test": "node tests/allowed-origins.mjs && node tests/access-policy-worker.mjs && node tests/workflow-advice.mjs && node tests/site-context-isolation.mjs && node tests/example-skill-layout.mjs && node tests/conditions.mjs && node tests/read-policy.mjs && node tests/cli-efficiency.mjs && node tests/bridge-roundtrip.mjs",
+    "test:browser": "node tests/efficiency-browser.mjs",
+    "benchmark:read": "node tests/adaptive-read-benchmark.mjs"
   }
 }

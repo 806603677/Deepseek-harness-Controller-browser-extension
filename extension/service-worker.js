@@ -3,8 +3,10 @@ import { createPageTools } from './page-tools.js'
 import { assessWorkflow } from './workflow-advice.js'
 import { conditionOptions, pollCondition } from './conditions.js'
 import { SnapshotCache } from './snapshot-cache.js'
+import { AdaptiveReadPolicy } from './read-policy.js'
 
 const snapshotCache = new SnapshotCache()
+const readPolicy = new AdaptiveReadPolicy()
 
 const NATIVE_HOST = 'com.dsh.edge'
 const RECONNECT_ALARM = 'dsh-native-host-reconnect'
@@ -118,6 +120,7 @@ async function claimTab(tabId) {
 async function releaseTab(tabId) {
   const numericId = Number(tabId)
   snapshotCache.clearTab(numericId)
+  readPolicy.clearTab(numericId)
   if (claimedTabs.has(numericId)) {
     try {
       await chrome.debugger.detach({ tabId: numericId })
@@ -201,11 +204,36 @@ async function pageAction(tabId, action, ...args) {
 
 async function domSnapshot(tabId, options) {
   const before = await chrome.tabs.get(Number(tabId))
-  const result = await pageAction(tabId, 'snapshot', options)
+  const started = performance.now()
+  let decision = readPolicy.decide(tabId, options)
+  let fallbackFrom
+  let result
+  try {
+    result = decision.readMode === 'full'
+      ? await pageAction(tabId, 'snapshot')
+      : await pageAction(tabId, 'snapshot', decision.options)
+  } catch (error) {
+    if (decision.readMode !== 'focus' || !/not found|unavailable|Ambiguous/i.test(error.message)) throw error
+    fallbackFrom = 'focus'
+    snapshotCache.clearTab(tabId)
+    readPolicy.clearTab(tabId)
+    decision = { ...readPolicy.decide(tabId), reason: 'focus_unavailable' }
+    result = await pageAction(tabId, 'snapshot', decision.options)
+  }
   const tab = await chrome.tabs.get(Number(tabId))
   if (before.url !== tab.url) throw new Error('Page changed while reading the snapshot; read the current page again')
-  const snapshot = result.mode === 'compact' ? snapshotCache.capture(tabId, result, options) : result
-  return { ...snapshot, url: sanitizedUrl(tab.url || '') }
+  const extractionMs = Math.round(performance.now() - started)
+  const snapshot = result.mode === 'compact'
+    ? snapshotCache.capture(tabId, result, decision.options, { maxChangeRatio: decision.readMode === 'delta' ? readPolicy.sceneChangeRatio : 1 })
+    : result
+  decision = readPolicy.complete(tabId, decision, snapshot)
+  const response = { ...snapshot, url: sanitizedUrl(tab.url || ''),
+    read: { mode: decision.readMode, reason: decision.reason, confidence: snapshot.baselineTruncated ? 'low' : snapshot.truncated ? 'medium' : 'high',
+      ...(fallbackFrom ? { fallbackFrom } : {}), decisionMs: decision.decisionMs, extractionMs,
+      changeRatio: snapshot.changeRatio ?? null,
+      nextRecommendedMode: snapshot.baselineTruncated || snapshot.changesTruncated ? 'focus' : 'delta' } }
+  response.read.payloadBytes = new TextEncoder().encode(JSON.stringify(response)).length
+  return response
 }
 
 async function waitForCondition(tabId, input) {
@@ -257,11 +285,14 @@ async function clickElement(tabId, selectorOrText, timeoutMs = 5000) {
   await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y })
   await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
   await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+  readPolicy.noteAction(tabId, 'click', point.locator)
   return point
 }
 
 async function fillElement(tabId, target, value) {
-  return pageAction(tabId, 'fill', target, value)
+  const result = await pageAction(tabId, 'fill', target, value)
+  readPolicy.noteAction(tabId, 'fill', result.locator || target)
+  return result
 }
 
 async function elementState(tabId, target) {
@@ -269,7 +300,9 @@ async function elementState(tabId, target) {
 }
 
 async function blurElement(tabId, target) {
-  return pageAction(tabId, 'blur', target)
+  const result = await pageAction(tabId, 'blur', target)
+  readPolicy.noteAction(tabId, 'blur', result.locator || target)
+  return result
 }
 
 async function sendKey(tabId, step) {
@@ -387,7 +420,8 @@ async function executeRequest(message, source = 'native') {
   if (tabScopedMethods.has(message.method)) await ensureClaimed(params.tabId)
   switch (message.method) {
     case 'status':
-      return { nativeHostConnected: Boolean(nativePort), claimedTabIds: [...claimedTabs].map(String), browserAccessEnabled }
+      return { nativeHostConnected: Boolean(nativePort), claimedTabIds: [...claimedTabs].map(String), browserAccessEnabled,
+        defaultReadMode: 'auto', fullReadAvailable: true }
     case 'set_browser_access_enabled': {
       if (source !== 'popup') throw new Error('Only the browser popup can enable the controller')
       if (typeof params.enabled !== 'boolean') throw new Error('Expected a boolean enabled value')
@@ -413,6 +447,8 @@ async function executeRequest(message, source = 'native') {
       const tabId = Number(params.tabId)
       if (!await siteIsAllowed(params.url)) throw new Error('URL is outside user-approved sites')
       const previousTimeOrigin = await evaluate(tabId, 'performance.timeOrigin', false)
+      snapshotCache.clearTab(tabId)
+      readPolicy.clearTab(tabId)
       const navigation = await cdp(tabId, 'Page.navigate', { url: params.url })
       if (navigation.errorText) throw new Error(`Navigation failed: ${navigation.errorText}`)
       await waitForReady(tabId, 60000, navigation.loaderId ? previousTimeOrigin : undefined)
@@ -421,6 +457,8 @@ async function executeRequest(message, source = 'native') {
     case 'reload': {
       const tabId = Number(params.tabId)
       const previousTimeOrigin = await evaluate(tabId, 'performance.timeOrigin', false)
+      snapshotCache.clearTab(tabId)
+      readPolicy.clearTab(tabId)
       await cdp(tabId, 'Page.reload', { ignoreCache: Boolean(params.ignoreCache) })
       await waitForReady(tabId, Math.min(Number(params.timeoutMs || 60000), 120000), previousTimeOrigin)
       return tabSummary(await chrome.tabs.get(tabId))
@@ -486,18 +524,23 @@ chrome.debugger.onDetach.addListener(source => {
   if (source.tabId == null) return
   claimedTabs.delete(source.tabId)
   snapshotCache.clearTab(source.tabId)
+  readPolicy.clearTab(source.tabId)
   saveClaims().catch(() => {})
   chrome.action.setBadgeText({ tabId: source.tabId, text: '' }).catch(() => {})
 })
 
 chrome.tabs.onRemoved.addListener(tabId => {
   snapshotCache.clearTab(tabId)
+  readPolicy.clearTab(tabId)
   if (!claimedTabs.delete(tabId)) return
   saveClaims().catch(() => {})
 })
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.url || changeInfo.status === 'loading') snapshotCache.clearTab(tabId)
+  if (changeInfo.url || changeInfo.status === 'loading') {
+    snapshotCache.clearTab(tabId)
+    readPolicy.clearTab(tabId)
+  }
   if (!claimedTabs.has(tabId) || !changeInfo.url) return
   accessReady.then(() => siteIsAllowed(changeInfo.url)).then(allowed => {
     if (!allowed) return releaseTab(tabId)

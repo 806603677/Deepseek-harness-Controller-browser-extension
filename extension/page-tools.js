@@ -277,10 +277,10 @@ export function createPageTools() {
   }
 
   function blur(target) {
-    const { el } = resolve(target, 'fill')
+    const { el, context } = resolve(target, 'fill')
     el.dispatchEvent(new Event('change', { bubbles: true }))
     el.blur()
-    return { blurred: true, domValue: valueOf(el) }
+    return { blurred: true, domValue: valueOf(el), locator: describe(el, context).locator }
   }
 
   function point(target) {
@@ -321,37 +321,48 @@ export function createPageTools() {
 
   function compactSnapshot(options) {
     if (Array.isArray(options) || typeof options !== 'object') throw new Error('Snapshot options must be an object')
-    const optionNames = ['mode', 'scope', 'selector', 'fields', 'limit', 'textLimit', 'includeValues', 'includeText', 'since']
+    const optionNames = ['mode', 'scope', 'selector', 'fields', 'limit', 'captureLimit', 'textLimit',
+      'includeValues', 'includeText', 'since', 'semanticScope', 'target']
     if (Object.keys(options).some(key => !optionNames.includes(key))) throw new Error('Unknown snapshot option')
     if (options.mode !== undefined && options.mode !== 'compact') throw new Error('Snapshot mode must be compact')
     for (const key of ['scope', 'selector', 'since']) {
       if (options[key] !== undefined && (typeof options[key] !== 'string' || !options[key].trim())) throw new Error(`${key} must be a non-empty string`)
     }
-    for (const key of ['includeValues', 'includeText']) {
+    for (const key of ['includeValues', 'includeText', 'semanticScope']) {
       if (options[key] !== undefined && typeof options[key] !== 'boolean') throw new Error(`${key} must be boolean`)
     }
     const limit = options.limit ?? 100
+    const captureLimit = options.captureLimit ?? limit
     const textLimit = options.textLimit ?? 2000
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error('limit must be an integer from 1 to 500')
+    if (!Number.isInteger(captureLimit) || captureLimit < limit || captureLimit > 1000) throw new Error('captureLimit must be an integer from limit to 1000')
     if (!Number.isInteger(textLimit) || textLimit < 0 || textLimit > 12000) throw new Error('textLimit must be an integer from 0 to 12000')
     const allowed = ['locator', 'tag', 'role', 'type', 'id', 'name', 'labels', 'placeholder', 'ariaLabel', 'text', 'href', 'value', 'checked', 'disabled', 'visible', 'contentEditable', 'frameDepth']
     const fields = options.fields ?? ['locator', 'role', 'labels', 'text', 'checked', 'disabled', ...(options.includeValues ? ['value'] : [])]
     if (!Array.isArray(fields) || fields.some(field => !allowed.includes(field))) throw new Error('Unknown snapshot field')
-    const scope = options.scope ? resolve(options.scope) : null
+    let scope = options.scope ? resolve(options.scope) : null
+    if (scope && options.semanticScope) {
+      const semantic = scope.el.closest('dialog,form,fieldset,tr,section,article,[role="dialog"],[role="alertdialog"],[role="row"]')
+      if (semantic && semantic !== scope.el.ownerDocument.body) scope = { el: semantic, context: scope.context }
+    }
     const items = allElements(scope, options.selector || SELECTOR).filter(item => visible(item.el))
     const selectedFields = [...new Set(['locator', ...fields])]
-    const elements = items.slice(0, limit).map(item => {
+    const serialize = item => {
       const d = describe(item.el, item.context)
       // A compact structural read must not leak an input value through textOf's fallback.
       if (['input', 'textarea', 'select'].includes(d.tag) || d.contentEditable) d.text = ''
       return Object.fromEntries(selectedFields.filter(field => field !== 'value' || options.includeValues === true)
         .filter(field => d[field] !== undefined).map(field => [field, d[field]]))
-    })
+    }
+    const baselineElements = items.slice(0, captureLimit).map(serialize)
+    const elements = baselineElements.slice(0, limit)
     const rawText = options.includeText === true ? (scope?.el || document.body)?.innerText || '' : ''
     return {
-      title: document.title, ready: document.readyState, mode: 'compact', scope: options.scope || null,
+      title: document.title, ready: document.readyState, mode: 'compact',
+      scope: scope ? describe(scope.el, scope.context).locator : null,
       elements, elementsCount: items.length, returnedCount: elements.length,
-      truncated: scanTruncated || items.length > limit, scanTruncated,
+      baselineElements, truncated: scanTruncated || items.length > limit,
+      baselineTruncated: scanTruncated || items.length > captureLimit, scanTruncated,
       ...(options.includeText === true ? { bodyText: rawText.slice(0, textLimit), textTruncated: rawText.length > textLimit } : {}),
       // Consumed by the worker for in-memory baseline isolation; never returned to the client.
       documentKey: `${performance.timeOrigin}:${location.href}`

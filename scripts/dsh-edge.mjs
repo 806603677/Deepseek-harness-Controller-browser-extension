@@ -21,7 +21,7 @@ const USAGE = `usage:
   node dsh-edge.mjs release-all
   node dsh-edge.mjs new <approvedUrl>
   node dsh-edge.mjs nav <approvedUrl> [tabId]
-  node dsh-edge.mjs dom [tabId] [--compact] [--scope <locator>] [--selector <css>] [--fields <comma-list>] [--limit <n>] [--text] [--text-limit <n>] [--values] [--since <snapshotId>]
+  node dsh-edge.mjs dom [tabId] [--auto|--full|--compact|--focus <locator>] [--scope <locator>] [--selector <css>] [--fields <comma-list>] [--limit <n>] [--text] [--text-limit <n>] [--values] [--since <snapshotId>]
   node dsh-edge.mjs dom-options <options.json> [tabId]
   node dsh-edge.mjs wait-for <condition.json> [tabId]
   node dsh-edge.mjs assert <condition.json> [tabId]
@@ -199,7 +199,15 @@ function domArguments(args) {
   const names = { '--scope': 'scope', '--selector': 'selector', '--fields': 'fields', '--limit': 'limit', '--text-limit': 'textLimit', '--since': 'since' }
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]
-    if (arg === '--compact') options.mode = 'compact'
+    if (arg === '--auto') options.mode = 'auto'
+    else if (arg === '--full') options.mode = 'full'
+    else if (arg === '--compact') options.mode = 'compact'
+    else if (arg === '--focus') {
+      const value = args[++i]
+      if (value === undefined || value.startsWith('--')) throw new Error('--focus requires a locator')
+      options.mode = 'focus'
+      options.target = value
+    }
     else if (arg === '--text') options.includeText = true
     else if (arg === '--values') options.includeValues = true
     else if (names[arg]) {
@@ -210,8 +218,10 @@ function domArguments(args) {
     } else if (!preferred && /^\d+$/.test(arg)) preferred = arg
     else throw new Error(`Unknown dom argument: ${arg}`)
   }
+  if (options.mode === 'full' && Object.keys(options).length > 1) throw new Error('--full cannot be combined with snapshot filters')
   if (options.includeValues && !options.fields) options.fields = ['locator', 'role', 'labels', 'text', 'value', 'checked', 'disabled']
-  return { preferred, options: Object.keys(options).length ? { mode: 'compact', ...options } : undefined }
+  if (Object.keys(options).length && !options.mode) options.mode = 'compact'
+  return { preferred, options: Object.keys(options).length ? options : undefined }
 }
 
 async function main() {
@@ -249,7 +259,7 @@ async function main() {
       const options = JSON.parse(await readFile(args[0], 'utf8'))
       if (!options || Array.isArray(options) || typeof options !== 'object') throw new Error('Snapshot options must be an object')
       const tabId = await resolveTabId(args[1])
-      return print(await request('dom', { tabId, options: { mode: 'compact', ...options } }))
+      return print(await request('dom', { tabId, options: { mode: options.mode || 'compact', ...options } }))
     }
     case 'wait-for':
     case 'assert': {

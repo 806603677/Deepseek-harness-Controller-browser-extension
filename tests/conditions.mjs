@@ -28,13 +28,20 @@ assert.equal(stable.attempts, 4, 'click waits for matching consecutive geometry 
 
 let id = 0, now = 0
 const cache = new SnapshotCache({ id: () => String(++id), now: () => now, maxEntries: 3, ttlMs: 100 })
-const snapshot = (elements, documentKey = 'doc1', truncated = false) => ({ mode: 'compact', elements, documentKey, truncated, elementsCount: elements.length })
+const snapshot = (elements, documentKey = 'doc1', baselineTruncated = false) => ({ mode: 'compact', elements,
+  baselineElements: elements, documentKey, truncated: baselineTruncated, baselineTruncated, elementsCount: elements.length })
 const first = cache.capture(1, snapshot([{ locator: '#a', text: 'old' }, { locator: '#b' }]))
 assert.equal('documentKey' in first, false)
 const delta = cache.capture(1, snapshot([{ locator: '#a', text: 'new' }, { locator: '#c' }]), { since: first.snapshotId })
 assert.deepEqual(delta.changed, [{ locator: '#a', text: 'new' }])
 assert.deepEqual(delta.added, [{ locator: '#c' }])
 assert.deepEqual(delta.removed, ['#b'])
+assert.equal(delta.changeRatio, 1.5)
+const sceneCache = new SnapshotCache({ id: (() => { let value = 0; return () => `scene-${++value}` })() })
+const sceneBase = sceneCache.capture(1, snapshot([{ locator: '#a' }, { locator: '#b' }, { locator: '#c' }]))
+const scene = sceneCache.capture(1, snapshot([{ locator: '#x' }, { locator: '#y' }, { locator: '#z' }]),
+  { since: sceneBase.snapshotId }, { maxChangeRatio: 0.35 })
+assert.equal(scene.resetReason, 'change_ratio')
 assert.equal(cache.capture(2, snapshot([]), { since: delta.snapshotId }).resetReason, 'baseline_missing')
 assert.equal(cache.capture(1, snapshot([], 'doc2'), { since: delta.snapshotId }).resetReason, 'page_changed')
 const limited = cache.capture(1, snapshot([], 'doc1', true))
